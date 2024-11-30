@@ -1,0 +1,119 @@
+#!/bin/sh
+[ -f /usr/sbin/led_ctrl.sh ] || return
+[ -f /usr/sbin/flashtest ] || return
+
+. /usr/sbin/led_ctrl.sh
+
+let stress_cnt=$1*90/100/2  #硬件同学测试需求：单次测试次数为寿命的90%的一半
+read_cnt=$2
+
+flashtest=`nvram get auto_flashtest`
+if [ "$flashtest" = "once" ];then
+        nvram unset auto_flashtest
+        nvram commit
+        echo "flashtest start only one time"
+else
+        return
+fi
+
+while true;do
+	boot_status=`cat /proc/xiaoqiang/boot_status`
+	if [ "$boot_status" = "3" ];then
+		break;
+	fi
+	sleep 5
+done
+
+blink_led_blue
+
+function print_uptime_date() {
+	echo -n `uptime` >> /data/resofflashtest
+	echo -n "    " >> /data/resofflashtest
+	echo -n `date` >> /data/resofflashtest
+	echo -n "    " >> /data/resofflashtest
+        sync
+}
+
+function check_err_stress() {
+        res=`dmesg | grep "mtd_stresstest: finished"`
+        if [ -z "$res" ]; then
+                blink_led_red
+                nvram set flashtestres=STRESS_ERROR
+		nvram commit
+                return 1
+        fi
+	dmesg -c > /dev/null
+	return 0
+}
+
+function check_err_read() {
+        res=`dmesg | grep "mtd_readtest: finished"`
+        if [ -z "$res" ]; then
+                blink_led_red
+                nvram set flashtestres=READ_ERROR
+                nvram commit
+                return 1
+        fi
+
+        dmesg -c > /dev/null
+        return 0
+}
+
+if [ "$flashtest" = "once" ]; then
+        [ -e /lib/modules/`uname -r`/mtd_stresstest.ko ] || return
+        # use rootfs for flashtest
+        curr_os=`nvram get flag_last_success`
+        mtd_test=21
+        [ "0" = "$curr_os" ] && mtd_test=22
+	stress_cnt_done=`bdata get stress_cnt_done`
+
+	if [ "done" != "$stress_cnt_done" ]; then
+		insmod /lib/modules/`uname -r`/mtd_stresstest.ko dev="$mtd_test" count="$stress_cnt"
+		rmmod mtd_stresstest.ko
+		check_err_stress
+		if [ "$?" = "0" ]; then
+			print_uptime_date
+			echo "    flash stress test done[count=$stress_cnt]" >> /data/resofflashtest
+			sync
+		else
+			print_uptime_date
+			echo "    flash stress test ERROR!!" >> /data/resofflashtest
+			return 1
+		fi
+		[ "$stress_cnt" = "$stress_cnt_done" ] && bdata set stress_cnt_done=done
+		[ -z $stress_cnt_done ] && bdata set stress_cnt_done=$stress_cnt
+		bdata commit
+	fi
+	cnt=0
+	while true;do
+		let cnt++
+		if [ "$cnt" -gt "$read_cnt" ]; then
+			break
+		fi
+		insmod /lib/modules/`uname -r`/mtd_readtest.ko dev="$mtd_test"
+		rmmod mtd_readtest.ko
+		check_err_read
+		if [ "$?" = "0" ]; then
+			if [ $(($cnt % 100)) = 0 ]; then
+				print_uptime_date
+				echo "    flash read test done[count:$cnt]" >> /data/resofflashtest
+				sync
+			fi
+		else
+			print_uptime_date
+			echo "    flash read test ERROR!![count:$cnt]" >> /data/resofflashtest
+			return 1
+		fi
+	done
+
+	print_uptime_date
+	echo "    flash read test SUCCESS!![$read_cnt]" >> /data/resofflashtest
+
+        gpio 1 1
+        gpio 2 1
+        gpio 3 0
+        nvram set restore_defaults=1
+        nvram commit
+        return
+fi
+

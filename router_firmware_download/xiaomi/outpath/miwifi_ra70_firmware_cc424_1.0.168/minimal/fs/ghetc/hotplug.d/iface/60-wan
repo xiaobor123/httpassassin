@@ -1,0 +1,373 @@
+#!/bin/sh
+
+logger -p notice -t "hotplug.d" "60-wan: run because of $INTERFACE $ACTION"
+
+mark_dnscheck1="0x100/0x300"
+mark_dnscheck2="0x200/0x300"
+mark_icmpcheck1="0x400/0xc00"
+mark_icmpcheck2="0x800/0xc00"
+dig_check_port1="11431"
+dig_check_port2="11432"
+prio_icmp="98"
+prio_dns="99"
+
+add_dns_blackhole_route()
+{
+    nexthop=$1
+    table=$2
+    cmd="ip route add blackhole $nexthop table $table"
+    ${cmd}
+}
+
+add_dns_route()
+{
+    dns=$1
+    nexthop=$2
+    table=$3
+    cmd="ip route add $dns/32 via $nexthop table $table"
+    ${cmd}
+}
+
+del_dns_route()
+{
+    table=$1
+    nexthop=$2
+    route=$(ip route show table $table)
+    echo "$route" | while read line
+    do
+        blackhole=`echo $line | grep blackhole`
+        if [ "x$blackhole" != "x" ]; then
+            ip=${line#*blackhole }
+            cmd="ip route del blackhole $ip table $table"
+            ${cmd}
+        fi
+        ip=${line%% *}
+        cmd="ip route del $ip/32 via $nexthop table $table"
+        ${cmd}
+    done
+}
+
+del_dns_mark()
+{
+    fwmark=$1
+    iptables_marked=$(iptables-save -c | grep udp | grep MARK | grep 53 | grep $fwmark)
+    echo "$iptables_marked" | while read line
+    do
+        direction=""
+        output=`echo $line | grep OUTPUT`
+        if [ "x$output" != "x" ]; then
+            direction="OUTPUT"
+        fi
+        prerouting=`echo $line | grep PREROUTING`
+        if [ "x$prerouting" != "x" ]; then
+            direction="PREROUTING"
+        fi
+        if [ "x$direction" == "x" ]; then
+            continue
+        fi
+        right=${line#*-d }
+        ip=${right%%/*}
+        if [ "x$ip" != "x" -a "x$fwmark" != "x" ]; then
+            cmd="iptables -t mangle -D $direction -p udp ! --sport $dig_check_port1:$dig_check_port2 --dport 53 -d $ip -j MARK --set-mark $fwmark"
+            ${cmd}
+        fi
+    done
+}
+
+add_dns_mark()
+{
+    logger -p notice -t "hotplug.d" "60-wan: dns --- [$1][$2] <-> [$3][$4][$5][$6]"
+    nexthop1=$1
+    nexthop2=$2
+    wan_dns1=$3
+    wan_dns2=$4
+    wan2_dns1=$5
+    wan2_dns2=$6
+    #wan
+    for wan_dns in $wan_dns1 $wan_dns2
+    do
+        if [ "$wan_dns" != "x" ]; then
+            fwmarked=$(ip rule | grep fwmark | grep $mark_dnscheck1)
+            if [ "x$fwmarked" == "x" ]; then
+                cmd="ip rule add fwmark $mark_dnscheck1 table dnscheck1 prio $prio_dns"
+                ${cmd}
+			fi
+            cmd="iptables -t mangle -A OUTPUT -p udp ! --sport $dig_check_port1:$dig_check_port2 --dport 53 -d $wan_dns -j MARK --set-mark $mark_dnscheck1"
+            ${cmd}
+            cmd="iptables -t mangle -A PREROUTING -p udp ! --sport $dig_check_port1:$dig_check_port2 --dport 53 -d $wan_dns -j MARK --set-mark $mark_dnscheck1"
+            ${cmd}
+            if [ "x$nexthop1" != "x" ]; then
+                add_dns_route $wan_dns $nexthop1 "dnscheck1"
+            fi
+        fi
+    done
+    #wan2
+    for wan2_dns in $wan2_dns1 $wan2_dns2
+    do
+        if [ "$wan2_dns" != "x" ]; then
+            fwmarked=$(ip rule | grep fwmark | grep $mark_dnscheck2)
+            if [ "x$fwmarked" == "x" ]; then
+                cmd="ip rule add fwmark $mark_dnscheck2 table dnscheck2 prio $prio_dns"
+                ${cmd}
+            fi
+            cmd="iptables -t mangle -A OUTPUT -p udp ! --sport $dig_check_port1:$dig_check_port2 --dport 53 -d $wan2_dns -j MARK --set-mark $mark_dnscheck2"
+            ${cmd}
+            cmd="iptables -t mangle -A PREROUTING -p udp ! --sport $dig_check_port1:$dig_check_port2 --dport 53 -d $wan2_dns -j MARK --set-mark $mark_dnscheck2"
+            ${cmd}
+            if [ "x$nexthop2" != "x" ]; then
+                add_dns_route $wan2_dns $nexthop2 "dnscheck2"
+            fi
+        fi
+    done
+}
+
+add_dns_rule()
+{
+    # wan and wan2 dns assign, delete first
+    del_dns_mark $mark_dnscheck1
+    del_dns_mark $mark_dnscheck2
+    if [ "x$nexthop1" == "x" ]; then
+        nexthop1="x"
+    fi
+    if [ "x$nexthop2" == "x" ]; then
+        nexthop2="x"
+    fi
+    add_dns_mark $nexthop1 $nexthop2 $1 $2 $3 $4
+}
+
+del_dns_rule()
+{
+    # wan dns assign
+    del_dns_route "dnscheck1" $nexthop1
+    del_dns_mark $mark_dnscheck1
+    cmd="ip rule del fwmark $mark_dnscheck1 table dnscheck1"
+    ${cmd}
+
+    # wan2 dns assign
+    del_dns_route "dnscheck2" $nexthop2
+    del_dns_mark $mark_dnscheck2
+    cmd="ip rule del fwmark $mark_dnscheck2 table dnscheck2"
+    ${cmd}
+}
+
+add_icmp_rule()
+{
+    # dual wan detect
+    fwmarked1=$(ip rule | grep fwmark | grep $mark_icmpcheck1)
+    fwmarked2=$(ip rule | grep fwmark | grep $mark_icmpcheck2)
+    if [ "x$fwmarked1" == "x" ]; then
+        ip rule add fwmark $mark_icmpcheck1 table icmpcheck1 prio $prio_icmp
+    fi
+    if [ "x$fwmarked2" == "x" ]; then
+        ip rule add fwmark $mark_icmpcheck2 table icmpcheck2 prio $prio_icmp
+    fi
+
+    lan_addr=$(ipcalc.sh $lan_address $lan_mask |grep -o "NETWORK=[0-9.]*"|awk -F= '{print $2}')
+
+    #default route for icmpcheck1
+    ip route replace default via $nexthop1 dev $l3_device1 table icmpcheck1
+    ip route replace $lan_addr/$lan_mask dev $lan_device table icmpcheck1 
+
+    #default route for icmpcheck2
+    ip route replace default via $nexthop2 dev $l3_device2 table icmpcheck2
+    ip route replace $lan_addr/$lan_mask dev $lan_device table icmpcheck2 
+}
+
+del_icmp_rule()
+{
+    # dual wan detect
+    ip rule del fwmark $mark_icmpcheck1 table icmpcheck1
+    ip rule del fwmark $mark_icmpcheck2 table icmpcheck2
+}
+
+get_default_route()
+{
+    . /lib/network/config.sh
+    ubus_call network.interface.wan status
+    json_get_var l3_device1 "l3_device"
+    json_select "route"
+    __idx=1
+    while json_is_a "$__idx" object; do
+        json_select "$((__idx++))"
+        json_get_var target1 "target"
+        json_get_var mask1 "mask"
+        json_get_var nexthop1 "nexthop"
+        json_select ".."
+    done
+    json_select ".."
+    json_select "ipv4-address"
+    __idx=1
+    while json_is_a "$__idx" object; do
+        json_select "$((__idx++))"
+        json_get_var address1 "address"
+        json_select ".."
+    done
+
+    ubus_call network.interface.wan2 status
+    json_get_var l3_device2 "l3_device"
+    json_select "route"
+    __idx=1
+    while json_is_a "$__idx" object; do
+        json_select "$((__idx++))"
+        json_get_var target2 "target"
+        json_get_var mask2 "mask"
+        json_get_var nexthop2 "nexthop"
+        json_select ".."
+    done
+    json_select ".."
+    json_select "ipv4-address"
+    __idx=1
+    while json_is_a "$__idx" object; do
+        json_select "$((__idx++))"
+        json_get_var address2 "address"
+        json_select ".."
+    done
+
+    ubus_call network.interface.lan status
+    json_get_var lan_device "l3_device"
+    json_select "ipv4-address"
+    __idx=1
+    while json_is_a "$__idx" object; do
+        json_select "$((__idx++))"
+        json_get_var lan_address "address"
+        json_get_var lan_mask "mask"
+        json_select ".."
+    done
+}
+
+dual_wan_route()
+{
+    targetx="x$target1"
+    maskx="x$mask1"
+    nexthopx="x$nexthop1"
+    if [ "$targetx" == "x" -o "$maskx" == "x" -o "$nexthopx" == "x" ]; then
+        wan1up="FALSE"
+    else
+        wan1up="TRUE"
+    fi
+
+    targetx="x$target2"
+    maskx="x$mask2"
+    nexthopx="x$nexthop2"
+    if [ "$targetx" == "x" -o "$maskx" == "x" -o "$nexthopx" == "x" ]; then
+        wan2up="FALSE"
+    else
+        wan2up="TRUE"
+    fi
+
+    if [ "$wan1up" == "TRUE" -a "$wan2up" == "TRUE" ]; then
+        weight1=$(uci -q get dualwan.common.weight_wan1)
+        weight2=$(uci -q get dualwan.common.weight_wan2)
+        if [ "x$weight1" == "x" ]; then
+            weight1="1"
+        fi
+        if [ "x$weight2" == "x" ]; then
+            weight2="1"
+        fi
+        ip route replace default scope global nexthop via $nexthop1 dev $l3_device1 weight $weight1  nexthop via $nexthop2 dev $l3_device2 weight $weight2
+        echo 1 > /proc/sys/net/ipv4/fib_multipath_hash_policy
+        del_icmp_rule
+        add_icmp_rule
+        cmd="ubus call wan_check reset"
+        ${cmd}
+    elif [ "$wan1up" == "TRUE" -a "$wan2up" == "FALSE" ]; then
+        ip route replace default via $nexthop1 dev $l3_device1
+        del_icmp_rule
+        del_dns_rule
+    elif [ "$wan1up" == "FALSE" -a "$wan2up" == "TRUE" ]; then
+        ip route replace default via $nexthop2 dev $l3_device2
+        del_icmp_rule
+        del_dns_rule
+    fi
+}
+
+[ "$1" = "DUAL_WAN_RESET" ] && {
+    get_default_route
+    dual_wan_route
+}
+
+[ "$1" = "DUAL_WAN_DEL_DNS_ROUTE" ] && {
+    get_default_route
+    del_dns_route "dnscheck1" $nexthop1
+    del_dns_route "dnscheck2" $nexthop2
+    add_dns_blackhole_route $2 $3
+}
+
+[ "$1" = "DUAL_WAN_RESET_DNS_ROUTE" ] && {
+    get_default_route
+    logger -p notice -t "hotplug.d" "60-wan: run because of $2 $3 $4 $5"
+    del_dns_rule
+    add_dns_rule $2 $3 $4 $5
+}
+
+[ "$ACTION" = "ifup" ] && [ "$INTERFACE" = "wan" ] && {
+    . /lib/network/config.sh
+    [ -f /usr/sbin/smartdns.lua ] && /usr/bin/lua /usr/sbin/smartdns.lua &
+    ubus_call network.interface.wan status
+    json_select "route"
+    __idx=1
+    while json_is_a "$__idx" object; do
+	json_select "$((__idx++))"
+        json_get_var target "target"
+        json_get_var mask "mask"
+        json_get_var nexthop "nexthop"
+        route add -net $target/$mask gw $nexthop metric 50
+        json_select ".."
+    done
+    get_default_route
+    dual_wan_route
+}
+
+[ "$ACTION" = "ifup" ] && [ "$INTERFACE" = "wan2" ] && {
+    get_default_route
+    dual_wan_route
+}
+
+[ "$ACTION" = "ifdown" ] && [ "$INTERFACE" = "wan" -o "$INTERFACE" = "wan2" ] && {
+    get_default_route
+    dual_wan_route
+}
+
+mode=$(uci -q get ipv6.settings.mode)
+
+[ "$INTERFACE" = "wan_6" -a "$mode" = "static" ] && {
+	wan6_old=$(ip -6 route | grep "default via" | awk 'NR==1 {print $3}')
+	if [ "$ACTION" == "ifup" ]; then
+		wan6_cfg=$(uci -q get ipv6.settings.ip6gw)
+		cur_proto=$(uci -q get network.wan.proto)
+		cur_ifname=$(uci -q get network.wan.ifname)
+		if [ -n "$wan6_old" -a "$wan6_cfg" != "$wan6_old" ]; then
+			ip -6 route del default via $wan6_old
+		fi
+		if [ "$cur_proto" == "pppoe" ]; then
+			cur_ifname=pppoe-wan
+		fi
+		if !(expr match "${wan6_cfg}" "fe80"); then
+			ip -6 route add $wan6_cfg dev $cur_ifname
+		fi
+		ip -6 route add default via $wan6_cfg dev $cur_ifname
+		ip -6 route del $wan6_cfg dev $cur_ifname
+	elif [ "$ACTION" == "ifdown" -a -n $wan6_old ]; then
+		ip -6 route del default via $wan6_old
+	fi
+}
+
+[ "$INTERFACE" = "wan_6" ] && [ "$mode" = "native" -o "$mode" = "nat" ] && {
+	#flush all deprecated address
+    ip -6 address flush scope global deprecated dynamic
+
+	res=$(ip -6 route | grep "default from")
+	wan6_gw=$(echo $res | awk 'NR==1 {print $5}')
+	wan6_itf=$(echo $res | awk 'NR==1 {print $7}')
+	[ -z "$wan6_gw" -o -z "$wan6_itf" ] && return
+
+	wan6_old=$(ip -6 route | grep "default via" | awk 'NR==1 {print $3}')
+	if [ "$ACTION" == "ifup" ]; then
+		[ -n "$wan6_old" ] && ip -6 route del default via $wan6_old
+		        ip -6 route add default via $wan6_gw dev $wan6_itf
+	elif [ "$ACTION" == "ifupdate" ]; then
+                ip -6 route change default via $wan6_gw dev $wan6_itf
+	elif [ "$ACTION" == "ifdown" -a -n $wan6_old ]; then
+		ip -6 route del default via $wan6_old
+	fi
+}

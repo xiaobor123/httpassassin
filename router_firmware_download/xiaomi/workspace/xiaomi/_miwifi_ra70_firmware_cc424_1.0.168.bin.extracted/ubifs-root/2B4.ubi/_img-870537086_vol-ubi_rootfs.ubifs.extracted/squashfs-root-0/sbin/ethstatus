@@ -1,0 +1,27 @@
+#!/bin/sh
+
+dump() {
+        type=$1
+        ports=
+        otype=$type
+        if [ "$type" = "lan" ]; then
+                ports=$(uci -q get misc.sw_reg.sw_lan_ports)
+                otype=""
+        else
+                ports=$(uci -q get misc.sw_reg.sw_wan_port)
+        fi
+
+    for port in $ports; do
+        id=$(($port-1))
+        status=$(cat /sys/class/net/eth${id}/carrier)
+        if [ "$status" = "1" ]; then
+            echo "port $port:up    $otype"
+        else
+            echo "port $port:down    $otype"
+        fi
+    done
+}
+
+dump "lan"
+dump "wan"
+

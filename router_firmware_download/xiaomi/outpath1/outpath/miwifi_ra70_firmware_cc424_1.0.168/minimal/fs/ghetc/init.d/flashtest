@@ -1,0 +1,36 @@
+#!/bin/sh /etc/rc.common
+#
+# This script is used for flash tester
+#
+
+START=49
+
+start() {
+	/usr/sbin/flashtest 100000 100000 &
+
+	return 0
+}
+
+
+stop() {
+	if [ -f /usr/sbin/xqled ];then
+		xqled sys_ok
+	else
+		gpio 1 0
+	fi
+	killall flashtest
+
+	return 0
+}
+
+restart() {
+	if [ -f /usr/sbin/xqled ];then
+		xqled sys_ok
+	else
+		gpio 1 0
+	fi
+	pidof flashtest >/dev/null && killall -9 flashtest
+	sleep 1
+	start
+}
+

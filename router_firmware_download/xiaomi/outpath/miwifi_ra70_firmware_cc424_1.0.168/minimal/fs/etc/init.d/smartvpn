@@ -1,0 +1,77 @@
+#!/bin/sh /etc/rc.common
+
+START=98
+
+set_smartvpn_switch_on="uci -q set smartvpn.vpn.disabled=0"
+set_smartvpn_switch_off="uci -q set smartvpn.vpn.disabled=1"
+set_switch_commit="uci commit smartvpn"
+
+APP_SMARTVPN="/usr/sbin/smartvpn.sh"
+export EXTRA_COMMANDS=" on off status "
+export EXTRA_HELP="	on	Switch to the start state and start
+	off	Switch to the stop state and stop
+	status	Get smartvpn status"
+
+start() {
+    local smartvpn_switch=$(uci -q get smartvpn.vpn.switch)
+    local smartvpn_disabled=$(uci -q get smartvpn.vpn.disabled)
+
+    [ -n "$smartvpn_disabled" -a "$smartvpn_disabled" == "1" ] && {
+	    [ -z "$smartvpn_switch" -o "$smartvpn_switch" == "0" ] && return 0
+    }
+
+    #vpn should relay, 
+    #default route add issue may be cause r1cm crash
+    #under condition of pppoe+l2tp+route traffic all 
+    local bootcheck=$( cat /proc/xiaoqiang/boot_status )
+    [ "$bootcheck" == "3" ] && {
+        local vpnauto=$(uci -q get network.vpn.auto)
+        [ "$vpnauto" = "1" ] && ifup vpn
+    }
+
+    [ -f $APP_SMARTVPN ] && $APP_SMARTVPN on
+
+    return 0
+}
+
+stop() {
+    [ -f $APP_SMARTVPN ] && $APP_SMARTVPN off
+
+    return 0
+}
+
+status() {
+    smartvpn_status=`uci -q get smartvpn.vpn.status 2>/dev/null`
+    echo "smartvpn status : $smartvpn_status"
+    [ $smartvpn_status = "on" ] && return 0 || return 1
+}
+
+off(){
+    fw3lock="/var/run/fw3.lock"
+    trap "lock -u $fw3lock; exit 1" SIGHUP SIGINT SIGTERM
+    lock $fw3lock
+
+    stop
+
+    $set_smartvpn_switch_off >/dev/null 2>&1
+    $set_switch_commit >/dev/null 2>&1
+
+    lock -u $fw3lock
+    return $?
+}
+
+on(){
+    
+    $set_smartvpn_switch_on >/dev/null 2>&1
+    $set_switch_commit >/dev/null 2>&1
+
+    fw3lock="/var/run/fw3.lock"
+    trap "lock -u $fw3lock; exit 1" SIGHUP SIGINT SIGTERM
+    lock $fw3lock
+
+    start
+    lock -u $fw3lock
+
+    return 0
+}
+

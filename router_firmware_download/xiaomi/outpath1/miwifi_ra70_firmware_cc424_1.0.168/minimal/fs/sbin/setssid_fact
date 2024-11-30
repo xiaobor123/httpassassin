@@ -1,0 +1,34 @@
+#!/bin/sh
+
+mac=$(getmac wan)
+mac_b5=$(echo $mac | cut -d ':' -f 5)
+mac_b6=$(echo $mac | cut -d ':' -f 6)
+model=$(bdata get model | tr 'A-Z' 'a-z')
+
+# Generate default SSID and SSID for uninitialized device
+# Extend UID part of default SSID
+
+prefix=xiaomi-router
+suf="_5G"
+suf_game="_Game"
+
+uid=$mac_b5$mac_b6
+extender=$(printf "%04X" $((0xffff-0x$uid)))
+ifconfig wifi0 1>&- 2>&- && {
+	bdata set "wl0_ssid=${prefix}-${model}_miap${uid}${suf}"
+	nvram set "wl0_ssid=${prefix}-${model}_miap${uid}${suf}"
+}
+ifconfig wifi1 1>&- 2>&- && {
+	bdata set "wl1_ssid=${prefix}-${model}_miap${uid}"
+	nvram set "wl1_ssid=${prefix}-${model}_miap${uid}"
+}
+ifconfig wifi2 1>&- 2>&- && {
+	bdata set "wl2_ssid=${prefix}-${model}_${uid}${suf}${suf_game}"
+	nvram set "wl2_ssid=${prefix}-${model}_${uid}${suf}${suf_game}"
+}
+bdata commit
+nvram commit
+
+# SSIDs in wireless config will be updated by wifi detect during next boot
+rm -f /etc/config/wireless
+sync

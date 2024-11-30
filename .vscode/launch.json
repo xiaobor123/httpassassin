@@ -1,0 +1,17 @@
+{
+    // 使用 IntelliSense 了解相关属性。 
+    // 悬停以查看现有属性的描述。
+    // 欲了解更多信息，请访问: https://go.microsoft.com/fwlink/?linkid=830387
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "Python 调试 greenhouse",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "/home/minipython/HttpdAssassin/greenhouse/Greenhouse/gh.py",
+            "console": "integratedTerminal",
+            "args": "/home/minipython/HttpdAssassin/greenhouse/Greenhouse/gh.py --outpath /home/minipython/HttpdAssassin/router_firmware_download/tenda/cve-routers/downloaded_firmware/ac8v4/outpath --workspace /home/minipython/HttpdAssassin/router_firmware_download/tenda/cve-routers/downloaded_firmware/ac8v4/workspace --logpath=/home/minipython/HttpdAssassin/router_firmware_download/tenda/cve-routers/downloaded_firmware/ac8v4/log --cache_path=/home/minipython/HttpdAssassin/router_firmware_download/tenda/cve-routers/downloaded_firmware/ac8v4/cache_path --ip 192.168.5.1 --ports=80 --max_cycles=25 -rh --brand=tenda --img_path=/home/minipython/HttpdAssassin/router_firmware_download/tenda/cve-routers/downloaded_firmware/ac8v4/US_AC8V4.0si_V16.03.34.06_cn_TDC01.bin",
+            "cwd": "/home/minipython/HttpdAssassin/greenhouse/Greenhouse",
+        }
+    ]
+}

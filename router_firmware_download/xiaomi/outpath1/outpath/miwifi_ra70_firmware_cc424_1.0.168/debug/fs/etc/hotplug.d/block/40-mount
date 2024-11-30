@@ -1,0 +1,183 @@
+#!/bin/sh
+# Copyright (C) 2009-2012 OpenWrt.org
+# Copyright (C) 2010 Vertical Communications
+# This is free software, licensed under the GNU General Public License v2.
+# See /LICENSE for more information.
+#
+
+. /lib/functions/block.sh
+
+prepare_filesystem() {
+	grep -q "$1" /proc/filesystems || {
+		insmod $1
+		wait
+	}
+}
+
+udisk_upgrade_check() {
+	[ -f $1/miwifi_ra70_all_udisk.bin ] || return 0
+	trx_type=$(mkxqimage -u $1/miwifi_ra70_all_udisk.bin | awk '{print $2}')
+	[ $trx_type == "13" ] || return 0
+	img_ver=$(mkxqimage -V $1/miwifi_ra70_all_udisk.bin | grep "option ROM")
+	cur_ver=$(bootinfo | grep "option ROM")
+	[ "$img_ver" == "$cur_ver" ] && return 0
+	cp -rf $1/miwifi_ra70_all_udisk.bin /tmp/miwifi_ra70_all_udisk.bin
+	/bin/flash_udisk.sh /tmp/miwifi_ra70_all_udisk.bin &
+}
+
+add_baidupan_task() {
+    /usr/bin/lua /usr/sbin/baidupan.lua add_disk
+    #/etc/init.d/baidupan stop
+    #/etc/init.d/baidupan start
+    #ps ww| grep baidup | grep -v grep
+    pidof baidupan
+    if [ $? -eq 1 ]; then
+		/etc/init.d/baidupan start
+    fi
+}
+
+blkdev=`dirname $DEVPATH`
+device=`basename $DEVPATH`
+
+mount_flag=1
+if [ `basename $blkdev` != "block" ]; then
+	mount_flag=0
+else
+	substr=$(echo $device|cut -c-2)
+	partitions=`cat /proc/partitions | grep $device | wc -l`
+	if [ $substr = "sd" -a $partitions -le 1 ]; then
+		mount_flag=0
+	fi
+fi
+
+proc_gpt_rsvd $device
+[ "$?" = "1" ] && exit 0
+
+if [ $mount_flag -eq 0 ]; then
+
+	#mountpoint=`sed -ne "s|^[^ ]*/$device ||; T; s/ .*//p" /proc/self/mounts | grep -v uploadfiles`
+	mountpoint=`cat /proc/self/mounts | grep $device | awk '{print $2}' | grep -v appdata`
+
+	case "$ACTION" in
+	add)
+
+		local from_fstab
+		local anon_mount
+		local anon_swap
+		local anon_fsck
+		local mds_mount_target
+		local mds_mount_device
+		local mds_mount_fstype
+		local sds_swap_device
+		local use_device
+		local do_fsck=0
+		local fsck_type
+
+		local autoswap_from_fstab
+		local automount_from_fstab
+
+		#skip any system partition
+		is_sys=`getdisk sysdisk $device`
+		[ "$is_sys" = "0" ] && exit 0
+
+		#skip any already mounted partition
+		grep -q "^/dev/$device" /proc/mounts && exit 0
+
+		mount_dev_section_cb() {
+			mds_mount_target="$2"
+			mds_mount_device="$3"
+			mds_mount_fstype="$4"
+			mds_mount_enabled="$6"
+		}
+
+		swap_dev_section_cb() {
+			sds_swap_device="$2"
+			return 0
+		}
+		config_get_automount
+		automount_from_fstab="$from_fstab"
+		[ "$automount_from_fstab" -eq 1 ] && {
+			config_get_mount_section_by_device "/dev/$device"
+			use_device="$mds_mount_device"
+			[ "$mds_mount_enabled" -eq 1 ] && {
+				if [ -n "$mds_mount_target" ]; then
+					grep -q "/dev/$device" /proc/swaps 2>/dev/null || grep -q "^/dev/$device" /proc/mounts || {
+						( mkdir -p "$mds_mount_target" && mount "$mds_mount_target" ) 2>&1 | tee /proc/self/fd/2 | logger -t 'fstab'
+					}
+				else
+					logger -t 'fstab' "Mount enabled for $mds_mount_device but it doesn't have a defined mountpoint (target)"
+				fi
+			}
+		}
+
+		[ -z "$use_device" ] && {
+			config_get_autoswap
+			autoswap_from_fstab="$from_fstab"
+
+			[ "$autoswap_from_fstab" -eq 1 ] && {
+				config_get_swap_section_by_device "/dev/$device"
+				use_device="$sds_swap_device"
+			}
+		}
+
+		grep -q "/dev/$device" /proc/swaps 2>/dev/null || grep -q "^/dev/$device" /proc/mounts || {
+			[ "$anon_mount" -eq 1 -a -z "$use_device" ] && {
+				case "$device" in
+					mtdblock*) ;;
+					*)
+						probe_type=`getdisk fs /dev/$device`
+						case $probe_type in
+							"ntfs")
+								mnt_cmd="ntfs-3g -o noatime,umask=0000"
+								;;
+							"exfat")
+								mnt_cmd="mount -t exfat -o noatime,umask=0000"
+								;;
+							"vfat")
+								mnt_cmd="mount -t vfat -o utf8=1,noatime,umask=0000"
+								;;
+							*)
+								mnt_type=""
+								[ -z "$probe_type" ] || mnt_type="-t $probe_type"
+								mnt_cmd="mount $mnt_type"
+								;;
+						esac
+
+						if [ -n "$mnt_cmd" ]; then
+							# in case we ran out of pagecache and get mount stuck at "D" state
+							echo 3 > /proc/sys/vm/drop_caches
+							mkdir -p /extdisks/$device
+
+							$mnt_cmd /dev/$device /extdisks/$device
+							if [ "$?" = "0" ] ; then
+								dmesg  | tail -n 5 | grep $device | grep -q dirty
+								if [ "$?" = "0" ] ; then
+									echo "/dev/$device" >> /tmp/.dirty_part
+#									mount -o remount,ro /extdisks/$device
+									logger -s -p 3 -t "Hotplug" "$device: Dirty $probe_type partition"
+								fi
+								udisk_upgrade_check /extdisks/$device
+							else
+								logger -s -p 3 -t "Hotplug" "$device: Mount failed. Code=$?"
+							fi
+						else
+							logger -s -p 3 -t "Hotplug" "$device: Mount failed. Not support $probe_type"
+						fi
+					;;
+				esac
+			}
+		}
+		reset_dev_section_cb
+        
+        add_baidupan_task
+
+		;;
+	remove)
+		logger -s -p 3 -t "Hotplug" "remove $device"
+		echo 3 > /proc/sys/vm/drop_caches
+		echo 1 > /proc/sys/vm/compact_memory
+		;;
+	esac
+
+fi
+

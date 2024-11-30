@@ -1,0 +1,23 @@
+#!/bin/sh
+
+netmode="`uci -q get xiaoqiang.common.NETMODE`"
+if [ "${netmode}" != "whc_re" ]; then
+        echo "not re, exit"
+        exit 1
+fi
+
+wpa_supplicant_exist="`ps w | grep -w "wpa_supplicant -g" | grep -v grep | wc -l`"
+[ ${wpa_supplicant_exist} -ne 1 ] && exit 1
+
+bh_tag=$(uci -q get misc.backhauls.backhaul)
+[ -z "$bh_tag" ] && bh_tag="game"
+ifname="`uci -q get misc.backhauls.backhaul_${bh_tag}_sta_iface`"
+driver="nl80211"
+bridge="br-lan"
+
+sleep 5
+[ -f "/var/run/wpa_supplicant-$ifname.lock" ] && rm /var/run/wpa_supplicant-$ifname.lock
+wpa_cli -g /var/run/wpa_supplicantglobal interface_remove $ifname
+wpa_cli -g /var/run/wpa_supplicantglobal interface_add $ifname /var/run/wpa_supplicant-$ifname.conf $driver /var/run/wpa_supplicant-$ifname "" $bridge
+touch /var/run/wpa_supplicant-$ifname.lock
+

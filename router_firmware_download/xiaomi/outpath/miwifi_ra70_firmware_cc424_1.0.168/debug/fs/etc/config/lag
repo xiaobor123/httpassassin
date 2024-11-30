@@ -1,0 +1,4 @@
+config lag "lag"
+    option enable "0"
+    option ports "1 2"
+    option mode "2"

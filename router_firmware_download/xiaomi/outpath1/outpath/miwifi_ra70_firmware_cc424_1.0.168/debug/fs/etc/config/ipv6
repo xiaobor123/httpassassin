@@ -1,0 +1,19 @@
+config ipv6 settings
+    option enabled "0"
+    option mode "off"
+    option ipv6_show "1"
+    option firewall "1"
+
+config dns dns
+    option peerdns "1"
+
+config ipv6 settings2
+    option enabled "0"
+    option mode "off"
+    option ipv6_show "1"
+    option firewall "1"
+
+config dns dns2
+    option peerdns "1"
+
+

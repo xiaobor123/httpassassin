@@ -1,0 +1,53 @@
+###################### PATCH LOOP [0] ######################
+[QemuRunner] ----- emulation output -----
+[qemu] doing qemu_execven on filename /sbin/procd
+[qemu] doing qemu_execven on filename /sbin/ubusd
+[qemu] doing qemu_execven on filename /etc/init.d/sysapihttpd
+qemu: no user program specified
+[qemu] doing qemu_execven on filename /bin/ps
+argv[0]:/sbin/ubusd,basename:ubusd
+is ubusd
+[qemu] Successful Bind 0
+  PID USER       VSZ STAT COMMAND
+get new connect accept fd :9
+new client id will send hello
+
+[QemuRunner] ----- emulation end -----
+[QemuRunner] Network Flags
+[ROADBLOCK] requires multi-threading/child-processes to handle server response
+    - 2 subtargets
+###################### PATCH LOOP [1] ######################
+[QemuRunner] ----- emulation output -----
+[qemu] doing qemu_execven on filename /sbin/procd
+[qemu] doing qemu_execven on filename /sbin/ubusd
+[qemu] doing qemu_execven on filename /etc/init.d/sysapihttpd
+qemu: no user program specified
+[qemu] doing qemu_execven on filename /bin/ps
+argv[0]:/sbin/ubusd,basename:ubusd
+is ubusd
+[qemu] Successful Bind 0
+  PID USER       VSZ STAT COMMAND
+get new connect accept fd :9
+new client id will send hello
+
+[QemuRunner] ----- emulation end -----
+[QemuRunner] Network Flags
+[ROADBLOCK] requires multi-threading/child-processes to handle server response
+    - 2 subtargets
+###################### PATCH LOOP [2] ######################
+[QemuRunner] ----- emulation output -----
+[qemu] doing qemu_execven on filename /sbin/procd
+[qemu] doing qemu_execven on filename /sbin/ubusd
+[qemu] doing qemu_execven on filename /etc/init.d/sysapihttpd
+qemu: no user program specified
+[qemu] doing qemu_execven on filename /bin/ps
+argv[0]:/sbin/ubusd,basename:ubusd
+is ubusd
+[qemu] Successful Bind 0
+  PID USER       VSZ STAT COMMAND
+get new connect accept fd :9
+new client id will send hello
+
+[QemuRunner] ----- emulation end -----
+[QemuRunner] Network Flags
+[Greenhouse] No patch successful

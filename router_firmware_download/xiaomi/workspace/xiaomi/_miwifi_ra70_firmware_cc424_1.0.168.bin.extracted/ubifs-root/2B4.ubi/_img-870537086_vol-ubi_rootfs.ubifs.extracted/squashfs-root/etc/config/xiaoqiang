@@ -1,0 +1,2 @@
+config core 'common'
+    option wan_port_type '2.5G'

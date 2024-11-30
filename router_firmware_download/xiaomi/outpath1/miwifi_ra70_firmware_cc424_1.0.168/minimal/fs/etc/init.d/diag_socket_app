@@ -1,0 +1,25 @@
+#!/bin/sh /etc/rc.common
+#
+# Copyright (c) 2017 Qualcomm Technologies, Inc.
+#
+# All Rights Reserved.
+# Confidential and Proprietary - Qualcomm Technologies, Inc.
+
+START=49
+
+start_diag_app()
+{
+	# local serverip=`grep -oh "serverip.*#"  /proc/cmdline  | awk -F '#' '{print $2}'`
+	local serverip=192.168.31.100
+	/usr/sbin/diag_socket_app -a $serverip &
+	echo "/usr/sbin/diag_socket_app started" > /dev/kmsg
+}
+
+start() {
+	# is_ftm=`grep wifi_ftm_mode /proc/cmdline | wc -l`
+	is_ftm=`cat /proc/xiaoqiang/ft_mode`
+	wl0_radio=`nvram get wl0_radio`
+	wl1_radio=`nvram get wl1_radio`
+	[ $is_ftm = 1 ] && [ "$wl0_radio" != "1" ] && [ "$wl1_radio" != "1" ] && start_diag_app
+}
+

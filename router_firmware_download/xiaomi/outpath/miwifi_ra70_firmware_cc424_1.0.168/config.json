@@ -1,0 +1,37 @@
+{
+      "image": "miwifi_ra70_firmware_cc424_1.0.168",
+      "hash": "43fdbc81e2ec6c90655433629db4b751ccd09164fe53d1d975db82f2fa354497",
+      "brand": "xiaomi",
+      "result": "CRASHED",
+      "seconds_to_up": -1,
+      "targetpath": "/usr/sbin/sysapihttpd",
+      "targetip": "",
+      "targetport": "",
+      "ipv6enable": true,
+      "env": {
+            "LD_PRELOAD": "libnvram-faker.so"
+      },
+      "workdir": "/",
+      "background": [
+            [
+                  "/qemu-aarch64-static -hackbind -hackproc -hacksysinfo -execve \"/qemu-aarch64-static -hackbind -hackproc -hacksysinfo \" -E LD_PRELOAD=\"libnvram-faker.so\" /bin/sh /run_background.sh",
+                  1
+            ],
+            [
+                  "/run_setup.sh",
+                  1
+            ]
+      ],
+      "loginuser": "",
+      "loginpassword": "",
+      "loginurl": "",
+      "logintype": "",
+      "loginheaders": "",
+      "loginpayload": "",
+      "qemuargs": {
+            "hackbind": "",
+            "hackproc": "",
+            "hacksysinfo": "",
+            "execve": "/qemu-aarch64-static -hackbind -hackproc -hacksysinfo"
+      }
+}

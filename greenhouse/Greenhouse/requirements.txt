@@ -1,0 +1,10 @@
+r2pipe
+docker
+nclib
+requests
+python-nmap
+selenium
+lxml
+networkx
+ifaddr
+pwntools

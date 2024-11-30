@@ -1,0 +1,23 @@
+#!/bin/sh /etc/rc.common
+
+START=99
+
+USE_PROCD=1
+NAME=miwifi-discovery
+PROG="/usr/sbin/miwifi-discovery"
+
+start_service() {
+    mesh_mode=$(uci -q get xiaoqiang.common.NETMODE)
+    if [ "$mesh_mode" == "whc_re" -o "$mesh_mode" == "wifiapmode" ]; then
+        exit 0
+    fi
+
+    INITTED=$(uci -q get xiaoqiang.common.INITTED)
+    if [ "$INITTED" = "YES" ]; then
+        procd_open_instance
+        procd_set_param command "$PROG"
+        procd_set_param respawn
+        procd_close_instance
+    fi
+
+}

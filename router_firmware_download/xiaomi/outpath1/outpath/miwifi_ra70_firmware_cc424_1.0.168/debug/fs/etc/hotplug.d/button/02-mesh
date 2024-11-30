@@ -1,0 +1,5 @@
+#!/bin/sh
+
+if [ "$ACTION" = "released" -a "$BUTTON" = "mesh" ]; then
+	ubus call miwifi-discovery start_mesh
+fi

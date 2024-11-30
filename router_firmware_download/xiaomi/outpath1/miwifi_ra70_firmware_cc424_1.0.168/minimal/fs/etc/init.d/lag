@@ -1,0 +1,281 @@
+#!/bin/sh /etc/rc.common
+# Copyright (C) 2006 OpenWrt.org
+
+START=19
+NAME=lanaggregation
+EXTRA_COMMANDS="reset"
+
+
+BOND_IFNAME="bond0"
+LAN_IFNAME="br-lan"
+
+dual_wan_enable=$(uci -q get dualwan.common.enable)
+if [ "$dual_wan_enable" = "1" ]; then
+    LAN_IFNAMES="eth0 eth1 eth2"
+else
+    LAN_IFNAMES="eth0 eth1 eth2 eth3"
+fi
+
+wan_type=$(uci -q get xiaoqiang.common.wan_port_type)
+if [ "$wan_type" = "1G" ]; then
+    if [ "$dual_wan_enable" = "1" ]; then
+        LAN_IFNAMES="eth0 eth1 eth2"
+    else
+        LAN_IFNAMES="eth0 eth1 eth2 eth4"
+    fi
+fi
+
+ap_mode=$(uci -q get xiaoqiang.common.NETMODE)
+if [ "$ap_mode" = "wifiapmode" -o "$ap_mode" = "lanapmode" -o "$ap_mode" = "whc_re" ]; then
+    LAN_IFNAMES="eth0 eth1 eth2 eth3 eth4"
+fi
+
+log(){
+	echo "[LAG] $@" > /dev/console
+}
+
+get_ifname_from_portid(){
+	local portid=$1
+	local index=1
+
+	for ifname in $LAN_IFNAMES;
+	do
+		if [ $index == $portid ]; then
+			echo "$ifname"
+			return 1
+		fi
+
+		index=`expr $index + 1`
+	done
+
+	echo ""
+}
+
+get_lag_ifnames(){
+	local lag_ports=$(uci -q get lag.lag.ports)
+	local lagIfnames=""
+
+	for p in $lag_ports;
+	do
+		ifname=$(get_ifname_from_portid "$p")
+		[ -n "$ifname" ] && {
+			[ -z "lagIfnames" ] && lagIfnames=$ifname
+			lagIfnames=${lagIfnames}" $ifname"
+		}
+	done
+
+	echo "$lagIfnames"
+}
+
+is_slave_ifname(){
+	local ifname="$1"
+	local slave_list=$(get_lag_ifnames)
+
+	for slave in $slave_list;
+	do
+		[ "$slave" = "$ifname" ] && {
+			echo 0
+			return
+		}
+	done
+
+	echo 1
+}
+
+get_lan_ifnames(){
+	local enable=$(uci -q get lag.lag.enable)
+	local lan_ifnames=""
+
+	if [ "$enable" = "1" ]; then
+		for ifname in $LAN_IFNAMES;
+		do
+			[ 1 -eq $(is_slave_ifname "$ifname") ] && {
+				[ -z "lan_ifnames" ] && lan_ifnames=$ifname
+				lan_ifnames=${lan_ifnames}" $ifname"
+			}
+		done
+	else
+		lan_ifnames=$LAN_IFNAMES
+	fi
+
+	echo "$lan_ifnames"
+}
+
+set_driver_values() {
+	local bondif="$1"
+	local varname="$2"
+	local value="$3"
+
+	[ -n "$value" ] && echo "$value" > /sys/class/net/"$bondif"/bonding/"$varname"
+}
+
+diable_lan_aggregation() {
+	local boot=$1
+	local lan_ifnames=$LAN_IFNAMES
+
+	log "Disable LAG">/dev/console
+
+	if [ "$(cat /proc/net/dev |grep "$BOND_IFNAME")" == "" ]; then
+		log "ERROR - $BOND_IFNAME: No such device"
+		return
+	fi
+
+	echo "-$BOND_IFNAME" > /sys/class/net/bonding_masters
+
+	uci -q batch <<EOF
+	delete network.bond0
+	set network.lan.ifname='$lan_ifnames'
+	commit network
+EOF
+
+	case "$boot" in
+	"run"|"reset")
+		ubus call network reload
+		;;
+
+	esac
+	ifconfig | grep eth0 >/dev/null 2>&1
+	[ "$?" == "1" ] && {
+		ifconfig eth0 up
+		ifconfig eth1 up
+	}
+}
+
+enable_lan_aggregation(){
+	local boot=$1
+	local mode=$(uci -q get lag.lag.mode)
+	local slave_list=$(get_lag_ifnames)
+	local lan_ifnames=$(get_lan_ifnames)
+	local xmit_hash_policy=""
+	local all_slaves_active=""
+	local ad_select=""
+	local ad_actor_sys_prio=0
+	local miimon=100
+	local lacp_rate=1
+	local ifname="$BOND_IFNAME"
+
+	[ -z "$slave_list" ] && {
+		log "ERROR - no slave exist!"
+		return
+	}
+
+	# 0 is XOR Mode
+	# 1 is 8023AD LCAP Passive Mode
+	# 2 is 8023AD LCAP Active Mode
+	case "$mode" in
+		"0")
+			mode="balance-xor"
+			xmit_hash_policy=0
+		;;
+
+		"1")
+			mode="802.3ad"
+			all_slaves_active=0
+			xmit_hash_policy=0
+			ad_select=0
+		;;
+
+		"2")
+			mode="802.3ad"
+			all_slaves_active=1
+			xmit_hash_policy=1
+			ad_select=2
+		;;
+
+		*)
+			log "ERROR - $mode: Unsupported lag mode"
+			return
+		;;
+	esac
+
+	log "Enabling LAG">/dev/console
+	log "slave_list : $slave_list">/dev/console
+	log "lan_ifnames : $lan_ifnames">/dev/console
+	log "mode : $mode">/dev/console
+
+
+	# Check for loaded kernel bonding driver
+	[ -f "/sys/class/net/bonding_masters" ] || {
+		log "ERROR - bonding_masters does not exist"
+		return
+	}
+
+	# Add bonding interface to system
+	echo "+$BOND_IFNAME" > /sys/class/net/bonding_masters
+
+	# set mode
+	set_driver_values $BOND_IFNAME "mode" $mode
+
+	for slave in $slave_list; do
+		if [ "$(cat /proc/net/dev |grep "$slave")" == "" ]; then
+			log "ERROR - $slave: No such device"
+			return
+		fi
+
+		ifconfig "$slave" down
+		brctl delif $LAN_IFNAME $slave
+
+		sleep 1
+
+		set_driver_values $BOND_IFNAME "slaves" "+$slave"
+
+		ifconfig "$slave" up
+	done
+
+	[ -n "$xmit_hash_policy" ] && set_driver_values $BOND_IFNAME "xmit_hash_policy" "$xmit_hash_policy"
+	[ -n "$ad_select" ] && set_driver_values $BOND_IFNAME "ad_select" "$ad_select"
+	[ -n "$all_slaves_active" ] && set_driver_values $BOND_IFNAME "all_slaves_active" "$all_slaves_active"
+	[ -n "$ad_actor_sys_prio" ] && set_driver_values $BOND_IFNAME "ad_actor_sys_prio" "$ad_actor_sys_prio"
+	[ -n "$miimon" ] && set_driver_values $BOND_IFNAME "miimon" "$miimon"
+	[ -n "$lacp_rate" ] && set_driver_values $BOND_IFNAME "lacp_rate" "$lacp_rate"
+
+	uci -q batch <<EOF
+	set network.lan.ifname='$lan_ifnames $BOND_IFNAME'
+	set network.bond0=interface
+	set network.bond0.ifname='bond0'
+	set network.bond0.keepup='1'
+	commit network
+EOF
+
+	case "$boot" in
+	"run"|"reset")
+		ubus call network reload
+		;;
+
+	esac
+}
+
+boot() {
+    log "START lan aggregation">/dev/console
+    local flag=$(uci -q get lag.lag.enable)
+    [ "$flag" == "0" ] && {
+        return 0
+    }
+    enable_lan_aggregation "boot"
+    return 0
+}
+
+start() {
+    log "START lan aggregation">/dev/console
+    local flag=$(uci -q get lag.lag.enable)
+    [ "$flag" == "0" ] && {
+        return 0
+    }
+    enable_lan_aggregation "run"
+    return 0
+}
+
+stop() {
+    log "STOP lan aggregation">/dev/console
+    diable_lan_aggregation "run"
+}
+
+reset() {
+    local flag=$(uci -q get lag.lag.enable)
+    [ "$flag" == "0" ] && {
+        return 0
+    }
+    diable_lan_aggregation "reset"
+    sleep 3
+    enable_lan_aggregation "reset"
+}

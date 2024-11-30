@@ -1,0 +1,11 @@
+config miled settings
+    option name 'settings'
+    option action 'on'
+    option R_value '11'
+    option G_value '255'
+    option B_value '3'
+    option H_value '-1'
+    option S_value '-1'
+    option L_value '-1'
+    option status '0'
+    option event_button '1'

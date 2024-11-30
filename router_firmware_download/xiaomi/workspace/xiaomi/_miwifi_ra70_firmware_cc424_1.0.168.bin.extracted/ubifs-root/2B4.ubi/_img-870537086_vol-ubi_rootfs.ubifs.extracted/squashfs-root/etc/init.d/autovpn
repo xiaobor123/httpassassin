@@ -1,0 +1,34 @@
+#!/bin/sh /etc/rc.common
+
+START=99
+
+boot() {
+    local wanproto=$(uci -q get network.wan.proto)
+    if [ "$wanproto" != "pppoe" ]; then
+        start
+    else
+        (sleep 10; start) &
+    fi
+}
+
+start() {
+    local mode=$(uci -q get xiaoqiang.common.NETMODE)
+    if [ "$mode" == "wifiapmode" -o "$mode" == "lanapmode" -o "$mode" == "whc_re" ]; then
+        return 0
+    fi
+    [ ! -f "/usr/sbin/vpn.lua" ] && return 0
+
+    local vpnauto=$(uci -q get network.vpn.auto)
+    local vpnproto=$(uci -q get network.vpn.proto)
+
+    [ "$vpnauto" = "1" -a "$vpnproto" = "pptp" ] && {
+        local vpnstatus=$(ifstatus vpn | grep \"up\" | cut -d ' ' -f 2 | cut -d ',' -f 1)
+        [ "$vpnstatus" = "false" ] && {
+            ifdown vpn
+            /usr/sbin/vpn.lua up
+        }
+    }
+
+    return 0
+}
+

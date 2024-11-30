@@ -1,0 +1,100 @@
+#!/bin/sh /etc/rc.common
+
+START=99
+
+EXTRA_COMMANDS=" start_dual_wan stop_dual_wan "
+
+start_dual_wan(){
+    local enable=$(uci -q get dualwan.common.enable)
+    if [ "$enable" != "1" ]; then
+        return
+    fi
+
+    local wan2=$(uci -q get dualwan.common.wanMode)
+    local wan2_if="0"
+
+    if [ "$wan2" == "1G" ]; then
+	wan2_if="eth3"
+    elif [ "$wan2" == "2.5G" ]; then
+	wan2_if="eth4"
+    else
+        return
+    fi
+
+    local wan_if=$(uci -q get network.wan.ifname)
+    if [ "$wan2_if" == "$wan_if" ]; then
+	return
+    fi
+
+    uci -q batch <<EOF
+    set network.lan.ifname='eth0 eth1 eth2'
+    commit network
+EOF
+
+    uci -q batch <<EOF
+    set misc.sw_reg.sw_lan_ports='1 2 3'
+    set misc.samba.et_ifname='eth0 eth1 eth2'
+    commit misc
+EOF
+
+    # config firewall
+    local network=$(uci -q get firewall.@zone[1].network)
+    local wan2_exist=$(echo $network | grep "wan2")
+    if [[ "$wan2_exist" == "" ]]; then
+        uci set firewall.@zone[1].network="$network wan2"
+    fi
+    local forwarding=$(uci -q get firewall.@forwarding[1])
+    echo $forwarding
+    if [[ "$forwarding" == "" ]]; then
+        uci add firewall forwarding
+    fi
+    uci set firewall.@forwarding[1].src="lan"
+    uci set firewall.@forwarding[1].dest="wan2"
+    uci commit firewall
+
+#    brctl delif br-lan $wan_new                                  
+#    brctl addif br-lan $wan_old                                  
+    /etc/init.d/network restart                
+    /etc/init.d/samba restart 
+    fw3 restart
+}
+
+stop_dual_wan(){
+
+    local wan2=$(uci -q get dualwan.common.wanMode)
+    local wan2_if="0"
+    local port="0"
+
+    if [ "$wan2" == "1G" ]; then
+        wan2_if="eth3"
+	port="4"
+    elif [ "$wan2" == "2.5G" ]; then
+        wan2_if="eth4"
+	port="5"
+    else
+        return
+    fi
+
+    uci -q batch <<EOF
+    set network.lan.ifname='eth0 eth1 eth2 $wan2_if'
+    delete network.wan2;
+    commit network
+
+    set misc.sw_reg.sw_lan_ports='1 2 3 $port'
+    set misc.samba.et_ifname='eth0 eth1 eth2 $wan2_if'
+    commit misc
+EOF
+    # config firewall
+    uci -q batch <<EOF
+    del firewall.@forwarding[1]
+    commit firewall
+EOF
+    /etc/init.d/network restart                
+    /etc/init.d/samba restart 
+    fw3 restart
+    ip rule del fwmark 0x400/0x400 table icmpcheck1
+    ip rule del fwmark 0x800/0x800 table icmpcheck2
+}
+
+# Synchronizing DNS Configurations
+ubus call wan_check reset

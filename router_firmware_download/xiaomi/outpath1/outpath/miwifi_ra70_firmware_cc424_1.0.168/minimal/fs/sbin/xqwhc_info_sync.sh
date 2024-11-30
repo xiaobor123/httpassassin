@@ -1,0 +1,1073 @@
+#!/bin/sh
+# Copyright (C) 2016 Xiaomi
+#
+
+# for d01/r3600, called by trafficd handle whc_sync
+
+USE_ENCODE=1
+
+mesh_version=$(uci -q get xiaoqiang.common.MESH_VERSION)
+cap_mode=$(uci -q get xiaoqiang.common.CAP_MODE)
+if [ "$ap_mode" = "whc_cap" ] || [ "$mesh_version" = "2" -a "$ap_mode" = "lanapmode" -a "$cap_mode" = "ap" ]; then
+    exit 0
+fi
+
+[ $mesh_version -gt 1 ] && {
+    . /lib/mimesh/mimesh_public.sh
+} || {
+    . /lib/xqwhc/xqwhc_public.sh
+}
+
+xqwhc_lock="/var/run/xqwhc_wifi.lock"
+cfgf_origin="/var/run/xq_whc_sync"
+pid=$$
+cfgf="${cfgf_origin}_${pid}"
+cfgf_fake="/var/run/xq_whc_sync_fake"
+son_changed=0   # wifi change, need wifi reset
+sys_changed=0
+miscan_changed=0
+iot_switch_changed=0
+B64_ENC=0
+
+SUPPORT_GUEST_ON_RE=0   # for now, we only support guest network on CAP. so we don not handle guest opts
+
+g_bsd=
+calc_bsd()
+{
+    local bsd1=$1
+    local bsd=$2
+
+    if [ "$bsd1" = "0" ]; then
+        if [ "$bsd" = "0" ]; then
+            g_bsd="0"
+        elif [ "$bsd" = "1" ]; then
+            g_bsd="1"
+        fi
+    elif [ "$bsd1" = "1" ]; then
+        if [ "$bsd" = "0" ]; then
+            g_bsd="2"
+        elif [ "$bsd" = "1" ]; then
+            g_bsd="3"
+        fi
+    fi
+}
+
+wifi_parse()
+{
+    local BHTAG="game"
+    local BHTAG_SEC="5g"
+    local bhdev=$(uci -q get misc.backhauls.backhaul)
+    [ -z "$bhdev" ] && bhdev="$BHTAG"
+    local chan_5g="`cat $cfgf | grep -w "ch_5g" | awk -F ":=" '{print $2}'`"
+    local bh_band="`cat $cfgf | grep -w "bh_band" | awk -F ":=" '{print $2}'`"
+    [ "auto" = "$chan_5g" ] && chan_5g="0"
+    if [ "$bhdev" = "$BHTAG" -a "$chan_5g" -gt 64 ] || [ "$bh_band" = "5gh" ]; then
+        WHC_LOGI " xq_whc_sync, bh channel change to $chan_5g, bh radio change $BHTAG -> $BHTAG_SEC"
+        bhdev=$BHTAG_SEC
+        uci -q set misc.backhauls.backhaul="$BHTAG_SEC"
+        uci commit misc
+    fi
+    if [ "$bhdev" != "$BHTAG" -a "$chan_5g" -ge 36 -a "$chan_5g" -le 64 ] || [ "$bh_band" = "5g" ]; then
+        WHC_LOGI " xq_whc_sync, bh channel change to $chan_5g, bh radio change $BHTAG_SEC -> $BHTAG"
+        bhdev=$BHTAG
+        uci -q set misc.backhauls.backhaul="$BHTAG"
+        uci commit misc
+    fi
+
+    local cap_is_dual_band=0
+    local bsd1="`cat $cfgf | grep -w "bsd1" | awk -F ":=" '{print $2}'`"
+    #2g wifi-iface options
+    local ssid_2_enc="`cat $cfgf | grep -w "ssid_2g" | awk -F ":=" '{print $2}'`"
+    local pswd_2_enc="`cat $cfgf | grep -w "pswd_2g" | awk -F ":=" '{print $2}'`"
+    local ssid_2="$ssid_2_enc"
+    local pswd_2="$pswd_2_enc"
+    if [ "$USE_ENCODE" -gt 0 ]; then
+        ssid_2="$(base64_dec "$ssid_2_enc")"
+        pswd_2="$(base64_dec "$pswd_2_enc")"
+    fi
+    local mgmt_2="`cat $cfgf | grep -w "mgmt_2g" | awk -F ":=" '{print $2}'`"
+    local hidden_2="`cat $cfgf | grep -w "hidden_2g" | awk -F ":=" '{print $2}'`"
+    local disabled_2="`cat $cfgf | grep -w "disabled_2g" | awk -F ":=" '{print $2}'`"
+    local bsd_2="`cat $cfgf | grep -w "bsd_2g" | awk -F ":=" '{print $2}'`"
+    if [ -n "$bsd1" ]; then
+        calc_bsd $bsd1 $bsd_2
+        bsd_2=$g_bsd
+    fi
+    local sae_2="`cat $cfgf | grep -w "sae_2g" | awk -F ":=" '{print $2}'`"
+    local sae_pswd_2_enc="`cat $cfgf | grep -w "sae_passwd_2g" | awk -F ":=" '{print $2}'`"
+    local sae_pswd_2="$sae_pswd_2_enc"
+    if [ "$USE_ENCODE" -gt 0 ]; then
+        sae_pswd_2="$(base64_dec "$sae_pswd_2")"
+    fi
+    local ieee80211w_2="`cat $cfgf | grep -w "ieee80211w_2g" | awk -F ":=" '{print $2}'`"
+
+    [ -z "$ssid_2" ] && {
+        WHC_LOGE " xq_whc_sync, wifi options 2g ssid invalid ignore!"
+        cp "$cfgf" "$cfgf_fake"
+        return 1
+    }
+
+    local ifname_2g=$(uci -q get misc.wireless.ifname_2G)
+    local iface_2g=$(uci show wireless | grep "ifname=\'$ifname_2g\'" | awk -F"." '{print $2}')
+    local ifname_5g=$(uci -q get misc.wireless.ifname_5G)
+    local iface_5g=$(uci show wireless | grep "ifname=\'$ifname_5g\'" | awk -F"." '{print $2}')
+    local ifname_game=$(uci -q get misc.wireless.ifname_game)
+    local iface_game=$(uci show wireless | grep "ifname=\'$ifname_game\'" | awk -F"." '{print $2}')
+    local device_2g=$(uci -q get misc.wireless.if_2G)
+    local device_5g=$(uci -q get misc.wireless.if_5G)
+    local device_game=$(uci -q get misc.wireless.if_game)
+    
+    ssid_2_cur="`uci -q get wireless.$iface_2g.ssid`"
+    pswd_2_cur="`uci -q get wireless.$iface_2g.key`"
+    [ -z "$pswd_2_cur" ] && pswd_2_cur=""
+    mgmt_2_cur="`uci -q get wireless.$iface_2g.encryption`"
+    hidden_2_cur="`uci -q get wireless.$iface_2g.hidden`"
+    [ -z "$hidden_2_cur" ] && hidden_2_cur=0
+    disabled_2_cur="`uci -q get wireless.$iface_2g.disabled`"
+    [ -z "$disabled_2_cur" ] && disabled_2_cur=0
+    local bsd_2_cur="`uci -q get wireless.$iface_2g.bsd`"
+    [ -z "$bsd_2_cur" ] && bsd_2_cur=0
+    local sae_2_cur="`uci -q get wireless.$iface_2g.sae`"
+    [ -z "$sae_2_cur" ] && sae_2_cur=""
+    local sae_pswd_2_cur="`uci -q get wireless.$iface_2g.sae_password`"
+    [ -z "$sae_pswd_2_cur" ] && sae_pswd_2_cur=""
+    local ieee80211w_2_cur="`uci -q get wireless.$iface_2g.ieee80211w`"
+    [ -z "$ieee80211w_2_cur" ] && ieee80211w_2_cur=""
+
+    [ "$ssid_2_cur" != "$ssid_2" ] && {
+        son_changed=1
+        WHC_LOGI " xq_whc_sync, 2g ssid change $ssid_2_cur -> $ssid_2"
+        uci set wireless.$iface_2g.ssid="$ssid_2"
+    }
+    [ "$pswd_2_cur" != "$pswd_2" ] && {
+        son_changed=1
+        WHC_LOGI " xq_whc_sync, 2g pswd change $pswd_2_cur -> $pswd_2"
+        if [ -n "$pswd_2" ]; then
+            uci set wireless.$iface_2g.key="$pswd_2"
+        else
+            uci -q delete wireless.$iface_2g.key
+        fi
+    }
+    [ "$mgmt_2_cur" != "$mgmt_2" ] && {
+        son_changed=1
+        WHC_LOGI " xq_whc_sync, 2g mgmt change $mgmt_2_cur -> $mgmt_2"
+        uci set wireless.$iface_2g.encryption="$mgmt_2"
+    }
+    [ "$hidden_2_cur" != "$hidden_2" ] && {
+        son_changed=1
+        WHC_LOGI " xq_whc_sync, 2g hidden change $hidden_2_cur -> $hidden_2"
+        uci set wireless.$iface_2g.hidden="$hidden_2"
+    }
+    [ "$disabled_2_cur" != "$disabled_2" ] && {
+        son_changed=1
+        WHC_LOGI " xq_whc_sync, 2g disabled change $disabled_2_cur -> $disabled_2"
+        uci set wireless.$iface_2g.disabled="$disabled_2"
+    }
+    [ "$bsd_2" != "$bsd_2_cur" ] && {
+         son_changed=1
+         WHC_LOGI " xq_whc_sync, 2g bsd change $bsd_2_cur -> $bsd_2"
+         uci set wireless.$iface_2g.bsd="$bsd_2"
+         uci set lbd.config.PHYBasedPrioritization="$bsd_2"
+         uci commit lbd
+    }
+    [ "$sae_2" != "$sae_2_cur" ] && {
+         son_changed=1
+         WHC_LOGI " xq_whc_sync, 2g sae change $sae_2_cur -> $sae_2"
+         if [ -n "$sae_2" ];then
+            uci set wireless.$iface_2g.sae="$sae_2"
+         else
+            uci -q delete wireless.$iface_2g.sae
+         fi
+    }
+    [ "$sae_pswd_2" != "$sae_pswd_2_cur" ] && {
+         son_changed=1
+         WHC_LOGI " xq_whc_sync, 2g sae password change $sae_pswd_2_cur -> $sae_pswd_2"
+         if [ -n "$sae_pswd_2" ];then
+            uci set wireless.$iface_2g.sae_password="$sae_pswd_2"
+         else
+            uci -q delete wireless.$iface_2g.sae_password
+         fi
+    }
+    [ "$ieee80211w_2" != "$ieee80211w_2_cur" ] && {
+         son_changed=1
+         WHC_LOGI " xq_whc_sync, 2g ieee80211w change $ieee80211w_2_cur -> $ieee80211w_2"
+         if [ -n "$ieee80211w_2" ];then
+            uci set wireless.$iface_2g.ieee80211w="$ieee80211w_2"
+         else
+            uci -q delete wireless.$iface_2g.ieee80211w
+         fi
+    }
+
+    #iface_5g_swap check for 3 radio suit CAP
+    local iface_5g_swap="`cat $cfgf | grep -w "iface_5g_swap" | awk -F ":=" '{print $2}'`"
+    [ -z "$iface_5g_swap" ] && iface_5g_swap=0
+
+    #5g & game suffix, for RB08 CAP 5g iface swap
+    local suffix_5g suffix_game
+    if [ "$bhdev" = "$BHTAG" ]; then
+        suffix_5g="5g_nbh"
+        suffix_game="5g"
+        [ "$iface_5g_swap" = "1" ] && {
+            suffix_5g="5g"
+            suffix_game="5g_nbh"
+        }
+    else
+        suffix_5g="5g"
+        suffix_game="5g_nbh"
+        [ "$iface_5g_swap" = "1" ] && {
+            suffix_5g="5g_nbh"
+            suffix_game="5g"
+        }
+    fi
+
+    #5g wifi-iface parse
+    local ssid_5_enc="`cat $cfgf | grep -w "ssid_${suffix_5g}" | awk -F ":=" '{print $2}'`"
+    local pswd_5_enc="`cat $cfgf | grep -w "pswd_${suffix_5g}" | awk -F ":=" '{print $2}'`"
+    local ssid_5="$ssid_5_enc"
+    local pswd_5="$pswd_5_enc"
+    if [ "$USE_ENCODE" -gt 0 ]; then
+        ssid_5="$(base64_dec "$ssid_5_enc")"
+        pswd_5="$(base64_dec "$pswd_5_enc")"
+    fi
+    local mgmt_5="`cat $cfgf | grep -w "mgmt_${suffix_5g}" | awk -F ":=" '{print $2}'`"
+    local hidden_5="`cat $cfgf | grep -w "hidden_${suffix_5g}" | awk -F ":=" '{print $2}'`"
+    local disabled_5="`cat $cfgf | grep -w "disabled_${suffix_5g}" | awk -F ":=" '{print $2}'`"
+    local bsd_5="`cat $cfgf | grep -w "bsd_${suffix_5g}" | awk -F ":=" '{print $2}'`"
+    if [ -n "$bsd1" ]; then
+        calc_bsd $bsd1 $bsd_5
+        bsd_5=$g_bsd
+    fi
+    local sae_5="`cat $cfgf | grep -w "sae_${suffix_5g}" | awk -F ":=" '{print $2}'`"
+    local sae_pswd_5_enc="`cat $cfgf | grep -w "sae_passwd_${suffix_5g}" | awk -F ":=" '{print $2}'`"
+    local sae_pswd_5="$sae_pswd_5_enc"
+    if [ "$USE_ENCODE" -gt 0 ]; then
+        sae_pswd_5="$(base64_dec "$sae_pswd_5")"
+    fi
+    local ieee80211w_5="`cat $cfgf | grep -w "ieee80211w_${suffix_5g}" | awk -F ":=" '{print $2}'`"
+
+
+    # game wifi-iface parse
+    local ssid_game_enc="`cat $cfgf | grep -w "ssid_${suffix_game}" | awk -F ":=" '{print $2}'`"
+    local pswd_game_enc="`cat $cfgf | grep -w "pswd_${suffix_game}" | awk -F ":=" '{print $2}'`"
+    local ssid_game="$ssid_game_enc"
+    local pswd_game="$pswd_game_enc"
+    if [ "$USE_ENCODE" -gt 0 ]; then
+        ssid_game="$(base64_dec "$ssid_game_enc")"
+        pswd_game="$(base64_dec "$pswd_game_enc")"
+    fi
+    local mgmt_game="`cat $cfgf | grep -w "mgmt_${suffix_game}" | awk -F ":=" '{print $2}'`"
+    local hidden_game="`cat $cfgf | grep -w "hidden_${suffix_game}" | awk -F ":=" '{print $2}'`"
+    local disabled_game="`cat $cfgf | grep -w "disabled_${suffix_game}" | awk -F ":=" '{print $2}'`"
+    local bsd_game="`cat $cfgf | grep -w "bsd_${suffix_game}" | awk -F ":=" '{print $2}'`"
+    local sae_game="`cat $cfgf | grep -w "sae_${suffix_game}" | awk -F ":=" '{print $2}'`"
+    local sae_pswd_game_enc="`cat $cfgf | grep -w "sae_passwd_${suffix_game}" | awk -F ":=" '{print $2}'`"
+    local sae_pswd_game="$sae_pswd_game_enc"
+    if [ "$USE_ENCODE" -gt 0 ]; then
+        sae_pswd_game="$(base64_dec "$sae_pswd_game")"
+    fi
+    local ieee80211w_game="`cat $cfgf | grep -w "ieee80211w_${suffix_game}" | awk -F ":=" '{print $2}'`"
+
+
+    if [ -z "$ssid_5" ] && [ -z "$ssid_game" ]; then
+        WHC_LOGE " xq_whc_sync, wifi options 5g and game ssid both invalid ignore!"
+        cp "$cfgf" "$cfgf_fake"
+        return 1
+    fi
+
+    if [ "$bhdev" = "$BHTAG" ]; then
+        [ -z "$ssid_5_enc" ] && {
+            WHC_LOGI " xq_whc_sync, sync from a dual-radio device, bh radio is $bhdev!"
+            cap_is_dual_band=1
+            ssid_5="$ssid_game"
+            pswd_5=$pswd_game
+            mgmt_5=$mgmt_game
+            hidden_5=$hidden_game
+            disabled_5=$disabled_game
+            bsd_5=$bsd_game
+            sae_5=$sae_game
+            sae_pswd_5=$sae_pswd_game
+            ieee80211w_5=$ieee80211w_game
+        }
+    else
+        [ -z "$ssid_game_enc" ] && {
+            WHC_LOGI " xq_whc_sync, sync from a dual-radio device, bh radio is $bhdev!"
+            cap_is_dual_band=1
+            ssid_game=$ssid_5
+            pswd_game=$pswd_5
+            mgmt_game=$mgmt_5
+            hidden_game=$hidden_5
+            disabled_game=$disabled_5
+            bsd_game=$bsd_5
+            sae_game=$sae_5
+            sae_pswd_game=$sae_pswd_5
+            ieee80211w_game=$ieee80211w_5
+        }
+    fi
+    [ $cap_is_dual_band -eq 1 ] && {
+        cap_type=$(uci -q get xiaoqiang.common.CAP_IS_DUAL_BAND)
+        if [ -z "$cap_type" ] || [ "$cap_type" -ne 1 ]; then
+            uci set xiaoqiang.common.CAP_IS_DUAL_BAND=1
+            uci commit xiaoqiang
+        fi
+    }
+
+    
+    #5g wifi-iface options
+    ssid_5_cur="`uci -q get wireless.$iface_5g.ssid`"
+    pswd_5_cur="`uci -q get wireless.$iface_5g.key`"
+    [ -z "$pswd_5_cur" ] && pswd_5_cur=""
+    mgmt_5_cur="`uci -q get wireless.$iface_5g.encryption`"
+    hidden_5_cur="`uci -q get wireless.$iface_5g.hidden`"
+    [ -z "$hidden_5_cur" ] && hidden_5_cur=0
+    disabled_5_cur="`uci -q get wireless.$iface_5g.disabled`"
+    [ -z "$disabled_5_cur" ] && disabled_5_cur=0
+    local bsd_5_cur="`uci -q get wireless.$iface_5g.bsd`"
+    [ -z "$bsd_5_cur" ] && bsd_5_cur=0
+    local sae_5_cur="`uci -q get wireless.$iface_5g.sae`"
+    [ -z "$sae_5_cur" ] && sae_5_cur=""
+    local sae_pswd_5_cur="`uci -q get wireless.$iface_5g.sae_password`"
+    [ -z "$sae_pswd_5_cur" ] && sae_pswd_5_cur=""
+    local ieee80211w_5_cur="`uci -q get wireless.$iface_5g.ieee80211w`"
+    [ -z "$ieee80211w_5_cur" ] && ieee80211w_5_cur=""
+
+
+    [ "$ssid_5_cur" != "$ssid_5" ] && {
+        son_changed=1
+        WHC_LOGI " xq_whc_sync, 5g ssid change $ssid_5_cur -> $ssid_5"
+        uci set wireless.$iface_5g.ssid="$ssid_5"
+    }
+    [ "$pswd_5_cur" != "$pswd_5" ] && {
+        son_changed=1
+        WHC_LOGI " xq_whc_sync, 5g pswd change $pswd_5_cur -> $pswd_5"
+        if [ -n "$pswd_5" ]; then
+           uci set wireless.$iface_5g.key="$pswd_5"
+        else
+           uci -q delete wireless.$iface_5g.key
+        fi
+    }
+    [ "$mgmt_5_cur" != "$mgmt_5" ] && {
+        son_changed=1
+        WHC_LOGI " xq_whc_sync, 5g mgmt change $mgmt_5_cur -> $mgmt_5"
+        uci set wireless.$iface_5g.encryption="$mgmt_5"
+    }
+    [ "$hidden_5_cur" != "$hidden_5" ] && {
+        son_changed=1
+        WHC_LOGI " xq_whc_sync, 5g hidden change $hidden_5_cur -> $hidden_5"
+        uci set wireless.$iface_5g.hidden="$hidden_5"
+    }
+    [ "$disabled_5_cur" != "$disabled_5" ] && {
+        son_changed=1
+        WHC_LOGI " xq_whc_sync, 5g disabled change $disabled_5_cur -> $disabled_5"
+        uci set wireless.$iface_5g.disabled="$disabled_5"
+    }
+    [ "$bsd_5" != "$bsd_5_cur" ] && {
+         son_changed=1
+         WHC_LOGI " xq_whc_sync, 5g bsd change $bsd_5_cur -> $bsd_5"
+         uci set wireless.$iface_5g.bsd="$bsd_5"
+         uci set lbd.config.PHYBasedPrioritization="$bsd_5"
+         uci commit lbd
+    }
+    [ "$sae_5" != "$sae_5_cur" ] && {
+         son_changed=1
+         WHC_LOGI " xq_whc_sync, 5g sae change $sae_5_cur -> $sae_5"
+         if [ -n "$sae_5" ];then
+            uci set wireless.$iface_5g.sae="$sae_5"
+         else
+            uci -q delete wireless.$iface_5g.sae
+         fi
+    }
+    [ "$sae_pswd_5" != "$sae_pswd_5_cur" ] && {
+         son_changed=1
+         WHC_LOGI " xq_whc_sync, 5g sae password change $sae_pswd_5_cur -> $sae_pswd_5"
+         if [ -n "$sae_pswd_5" ];then
+            uci set wireless.$iface_5g.sae_password="$sae_pswd_5"
+         else
+            uci -q delete wireless.$iface_5g.sae_password
+         fi
+    }
+    [ "$ieee80211w_5" != "$ieee80211w_5_cur" ] && {
+         son_changed=1
+         WHC_LOGI " xq_whc_sync, 5g ieee80211w change $ieee80211w_5_cur -> $ieee80211w_5"
+         if [ -n "$ieee80211w_5" ];then
+            uci set wireless.$iface_5g.ieee80211w="$ieee80211w_5"
+         else
+            uci -q delete wireless.$iface_5g.ieee80211w
+         fi
+    }
+
+    #game wifi-iface options
+    if [ -n "$bsd1" ]; then
+        calc_bsd $bsd1 $bsd_game
+        bsd_game=$g_bsd
+    fi
+    ssid_game_cur="`uci -q get wireless.$iface_game.ssid`"
+    pswd_game_cur="`uci -q get wireless.$iface_game.key`"
+    [ -z "$pswd_game_cur" ] && pswd_game_cur=""
+    mgmt_game_cur="`uci -q get wireless.$iface_game.encryption`"
+    hidden_game_cur="`uci -q get wireless.$iface_game.hidden`"
+    [ -z "$hidden_game_cur" ] && hidden_game_cur=0
+    disabled_game_cur="`uci -q get wireless.$iface_game.disabled`"
+    [ -z "$disabled_game_cur" ] && disabled_game_cur=0
+    local bsd_game_cur="`uci -q get wireless.$iface_game.bsd`"
+    [ -z "$bsd_game_cur" ] && bsd_game_cur=0
+    local sae_game_cur="`uci -q get wireless.$iface_game.sae`"
+    [ -z "$sae_game_cur" ] && sae_game_cur=""
+    local sae_pswd_game_cur="`uci -q get wireless.$iface_game.sae_password`"
+    [ -z "$sae_pswd_game_cur" ] && sae_pswd_game_cur=""
+    local ieee80211w_game_cur="`uci -q get wireless.$iface_game.ieee80211w`"
+    [ -z "$ieee80211w_game_cur" ] && ieee80211w_game_cur=""
+
+
+    [ "$ssid_game_cur" != "$ssid_game" ] && {
+        son_changed=1
+        WHC_LOGI " xq_whc_sync, game ssid change $ssid_game_cur -> $ssid_game"
+        uci set wireless.$iface_game.ssid="$ssid_game"
+    }
+    [ "$pswd_game_cur" != "$pswd_game" ] && {
+        son_changed=1
+        WHC_LOGI " xq_whc_sync, game pswd change $pswd_game_cur -> $pswd_game"
+        if [ -n "$pswd_game" ]; then
+           uci set wireless.$iface_game.key="$pswd_game"
+        else
+           uci -q delete wireless.$iface_game.key
+        fi
+    }
+    [ "$mgmt_game_cur" != "$mgmt_game" ] && {
+        son_changed=1
+        WHC_LOGI " xq_whc_sync, game mgmt change $mgmt_game_cur -> $mgmt_game"
+        uci set wireless.$iface_game.encryption="$mgmt_game"
+    }
+    [ "$hidden_game_cur" != "$hidden_game" ] && {
+        son_changed=1
+        WHC_LOGI " xq_whc_sync, game hidden change $hidden_game_cur -> $hidden_game"
+        uci set wireless.$iface_game.hidden="$hidden_game"
+    }
+    [ "$disabled_game_cur" != "$disabled_game" ] && {
+        son_changed=1
+        WHC_LOGI " xq_whc_sync, game disabled change $disabled_game_cur -> $disabled_game"
+        uci set wireless.$iface_game.disabled="$disabled_game"
+    }
+    [ "$bsd_game" != "$bsd_game_cur" ] && {
+        son_changed=1
+        WHC_LOGI " xq_whc_sync, game bsd change $bsd_game_cur -> $bsd_game"
+        uci set wireless.$iface_game.bsd="$bsd_game"
+        uci set lbd.config.PHYBasedPrioritization="$bsd_game"
+        uci commit lbd
+    }
+    [ "$sae_game" != "$sae_game_cur" ] && {
+         son_changed=1
+         WHC_LOGI " xq_whc_sync, game sae change $sae_game_cur -> $sae_game"
+         if [ -n "$sae_game" ];then
+            uci set wireless.$iface_game.sae="$sae_game"
+         else
+            uci -q delete wireless.$iface_game.sae
+         fi
+    }
+    [ "$sae_pswd_game" != "$sae_pswd_game_cur" ] && {
+         son_changed=1
+         WHC_LOGI " xq_whc_sync, game sae password change $sae_pswd_game_cur -> $sae_pswd_game"
+         if [ -n "$sae_pswd_game" ];then
+            uci set wireless.$iface_game.sae_password="$sae_pswd_game"
+         else
+            uci -q delete wireless.$iface_game.sae_password
+         fi
+    }
+    [ "$ieee80211w_game" != "$ieee80211w_game_cur" ] && {
+         son_changed=1
+         WHC_LOGI " xq_whc_sync, game ieee80211w change $ieee80211w_game_cur -> $ieee80211w_game"
+         if [ -n "$ieee80211w_game" ];then
+            uci set wireless.$iface_game.ieee80211w="$ieee80211w_game"
+         else
+            uci -q delete wireless.$iface_game.ieee80211w
+         fi
+    }
+    
+    #2g backhaul wifi-iface
+    backhauls="`uci show misc.backhauls.backhaul`"
+    flag="`echo $backhauls | grep 2g`"
+    uplink_backhaul_2g="`uci show misc.backhauls.backhaul_2g_ap_iface|awk -F "'" '{print $2}'`"
+    if [ "x$flag" != "x" -a "$uplink_backhaul_2g" == "wl1" ];then
+        backhaul_2g="`uci show misc.backhauls.backhaul_2g_sta_iface|awk -F "'" '{print $2}'`"
+        index="`uci show wireless|grep ifname|grep $backhaul_2g|awk -F "." '{print $2}'`"
+
+        sta_ssid_2_cur="`uci -q get wireless.$index.ssid`"
+        sta_pswd_2_cur="`uci -q get wireless.$index.key`"
+        [ -z "$sta_pswd_2_cur" ] && sta_pswd_2_cur=0
+        sta_mgmt_2_cur="`uci -q get wireless.$index.encryption`"
+        sta_hidden_2_cur="`uci -q get wireless.$index.hidden`"
+        [ -z "$sta_hidden_2_cur" ] && sta_hidden_2_cur=0
+        sta_sae_2_cur="`uci -q get wireless.$index.sae`"
+        [ -z "$sta_sae_2_cur" ] && sta_sae_2_cur=""
+        sta_sae_pswd_2_cur="`uci -q get wireless.$index.sae_password`"
+        [ -z "$sta_sae_pswd_2_cur" ] && sta_sae_pswd_2_cur=""
+        sta_ieee80211w_2_cur="`uci -q get wireless.$index.ieee80211w`"
+        [ -z "$sta_ieee80211w_2_cur" ] && sta_ieee80211w_2_cur=""
+
+        [ "$sta_ssid_2_cur" != "$ssid_2" ] && {
+            son_changed=1
+            WHC_LOGI " xq_whc_sync, backhaul 2g ssid change $sta_ssid_2_cur -> $ssid_2"
+            uci set wireless.$index.ssid="$ssid_2"
+        }
+        [ "$sta_pswd_2_cur" != "$pswd_2" ] && {
+            son_changed=1
+            WHC_LOGI " xq_whc_sync, backhaul 2g pswd change $sta_pswd_2_cur -> $pswd_2"
+            if [ -n "$pswd_2" ]; then
+                uci set wireless.$index.key="$pswd_2"
+            else
+                uci delete wireless.$index.key
+            fi
+        }
+        [ "$sta_mgmt_2_cur" != "$mgmt_2" ] && {
+            son_changed=1
+            WHC_LOGI " xq_whc_sync, backhaul 2g mgmt change $sta_mgmt_2_cur -> $mgmt_2"
+            uci set wireless.$index.encryption="$mgmt_2"
+        }
+        [ "$sta_hidden_2_cur" != "$hidden_2" ] && {
+            son_changed=1
+            WHC_LOGI " xq_whc_sync, backhaul 2g hidden change $sta_hidden_2_cur -> $hidden_2"
+            uci set wireless.$index.hidden="$hidden_2"
+        }
+        [ "$sae_2" != "$sta_sae_2_cur" ] && {
+            son_changed=1
+            WHC_LOGI " xq_whc_sync, backhaul 2g sae change $sta_sae_2_cur -> $sae_2"
+            if [ -n "$sae_2" ];then
+                uci set wireless.$index.sae="$sae_2"
+            else
+                uci -q delete wireless.$index.sae
+            fi
+        }
+        [ "$sae_pswd_2" != "$sta_sae_pswd_2_cur" ] && {
+            son_changed=1
+            WHC_LOGI " xq_whc_sync, backhaul 2g sae password change $sta_sae_pswd_2_cur -> $sae_pswd_2"
+            if [ -n "$sae_pswd_2" ];then
+                uci set wireless.$index.sae_password="$sae_pswd_2"
+            else
+                uci -q delete wireless.$index.sae_password
+            fi
+        }
+        [ "$ieee80211w_2" != "$sta_ieee80211w_2_cur" ] && {
+            son_changed=1
+            WHC_LOGI " xq_whc_sync, backhaul 2g ieee80211w change $sta_ieee80211w_2_cur -> $ieee80211w_2"
+            if [ -n "$ieee80211w_2" ];then
+                uci set wireless.$index.ieee80211w="$ieee80211w_2"
+            else
+                uci -q delete wireless.$index.ieee80211w
+            fi
+        }
+    fi
+
+    #5g backhaul wifi-iface
+    backhauls="`uci show misc.backhauls.backhaul`"
+    flag="`echo $backhauls | grep  5g`"
+    uplink_backhaul_5g="`uci show misc.backhauls.backhaul_5g_ap_iface|awk -F "'" '{print $2}'`"
+    if [ "x$flag" != "x" -a "$uplink_backhaul_5g" == "wl0" ];then
+        backhaul_5g="`uci show misc.backhauls.backhaul_5g_sta_iface|awk -F "'" '{print $2}'`"
+        index="`uci show wireless|grep ifname|grep $backhaul_5g|awk -F "." '{print $2}'`"
+
+        sta_ssid_5_cur="`uci -q get wireless.$index.ssid`"
+        sta_pswd_5_cur="`uci -q get wireless.$index.key`"
+        [ -z "$sta_pawd_5_cur" ] && sta_pawd_5_cur=0
+        sta_mgmt_5_cur="`uci -q get wireless.$index.encryption`"
+        sta_hidden_5_cur="`uci -q get wireless.$index.hidden`"
+        [ -z "$sta_hidden_5_cur" ] && sta_hidden_5_cur=0
+        sta_sae_5_cur="`uci -q get wireless.$index.sae`"
+        [ -z "$sta_sae_5_cur" ] && sta_sae_5_cur=""
+        sta_sae_pswd_5_cur="`uci -q get wireless.$index.sae_password`"
+        [ -z "$sta_sae_pswd_5_cur" ] && sta_sae_pswd_5_cur=""
+        sta_ieee80211w_5_cur="`uci -q get wireless.$index.ieee80211w`"
+        [ -z "$sta_ieee80211w_5_cur" ] && sta_ieee80211w_5_cur=""
+
+        [ "$sta_ssid_5_cur" != "$ssid_5" ] && {
+            son_changed=1
+            WHC_LOGI " xq_whc_sync, backhaul 5g ssid change $sta_ssid_5_cur -> $ssid_5"
+            uci set wireless.$index.ssid="$ssid_5"
+        }
+        [ "$sta_pswd_5_cur" != "$pswd_5" ] && {
+            son_changed=1
+            WHC_LOGI " xq_whc_sync, backhaul 5g pswd change $sta_pswd_5_cur -> $pswd_5"
+            if [ -n "$pswd_5" ]; then
+                uci set wireless.$index.key="$pswd_5"
+            else
+                uci -q delete wireless.$index.key
+            fi
+        }
+        [ "$sta_mgmt_5_cur" != "$mgmt_5" ] && {
+            son_changed=1
+            WHC_LOGI " xq_whc_sync, backhaul 5g mgmt change $sta_mgmt_5_cur -> $mgmt_5"
+            uci set wireless.$index.encryption="$mgmt_5"
+        }
+        [ "$sta_hidden_5_cur" != "$hidden_5" ] && {
+            son_changed=1
+            WHC_LOGI " xq_whc_sync, backhaul 5g hidden change $sta_hidden_5_cur -> $hidden_5"
+            uci set wireless.$index.hidden="$hidden_5"
+        }
+        [ "$sae_5" != "$sta_sae_5_cur" ] && {
+            son_changed=1
+            WHC_LOGI " xq_whc_sync, backhaul 5g sae change $sta_sae_5_cur -> $sae_5"
+            if [ -n "$sae_5" ];then
+                uci set wireless.$index.sae="$sae_5"
+            else
+                uci -q delete wireless.$index.sae
+            fi
+        }
+        [ "$sae_pswd_5" != "$sta_sae_pswd_5_cur" ] && {
+            son_changed=1
+            WHC_LOGI " xq_whc_sync, backhaul 5g sae password change $sta_sae_pswd_5_cur -> $sae_pswd_5"
+            if [ -n "$sae_pswd_5" ];then
+                uci set wireless.$index.sae_password="$sae_pswd_5"
+            else
+                uci -q delete wireless.$index.sae_password
+            fi
+        }
+        [ "$ieee80211w_5" != "$sta_ieee80211w_5_cur" ] && {
+            son_changed=1
+            WHC_LOGI " xq_whc_sync, backhaul 5g ieee80211w change $sta_ieee80211w_5_cur -> $ieee80211w_5"
+            if [ -n "$ieee80211w_5" ];then
+                uci set wireless.$index.ieee80211w="$ieee80211w_5"
+            else
+                uci -q delete wireless.$index.ieee80211w
+            fi
+        }
+
+    fi
+
+    # wifi-device options-2g
+    local txp_2="`cat $cfgf | grep -w "txpwr_2g" | awk -F ":=" '{print $2}'`"
+    local ch_2="`cat $cfgf | grep -w "ch_2g" | awk -F ":=" '{print $2}'`"
+    [ -z "$ch_2" -o "0" = "$ch_2" ] && ch_2="auto"
+    local bw_2="`cat $cfgf | grep -w "bw_2g" | awk -F ":=" '{print $2}'`"
+    local txbf_2="`cat $cfgf | grep -w "txbf_2g" | awk -F ":=" '{print $2}'`"
+    local ax_2="`cat $cfgf | grep -w "ax_2g" | awk -F ":=" '{print $2}'`"
+    local txp_2_cur="`uci -q get wireless.$device_2g.txpwr`"
+    [ -z "$txp_2_cur" ] && txp_2_cur="max"
+    local ch_2_cur="`uci -q get wireless.$device_2g.channel`"
+    [ -z "$ch_2_cur" -o "0" = "$ch_2_cur" ] && ch_2_cur="auto"
+    local bw_2_cur="`uci -q get wireless.$device_2g.bw`"
+    [ -z "$bw_2_cur" ] && bw_2_cur=0
+    local txbf_2_cur="`uci -q get wireless.$device_2g.txbf`"
+    [ -z "$txbf_2_cur" ] && txbf_2_cur=3
+    local ax_2_cur="`uci -q get wireless.$device_2g.ax`"
+    [ -z "$ax_2_cur" ] && ax_2_cur=1
+
+    [ "$ch_2" != "$ch_2_cur" ] && {
+        uci set wireless.$device_2g.channel="$ch_2"
+        # check real channel, if SAME then should save one wifi reset
+        local ch_2_act="`iwlist wl1 channel | grep -Eo "\(Channel.*\)" | grep -Eo "[1-9]+"`"
+        [ "$ch_2" != "$ch_2_act" ] && {
+            son_changed=1
+            WHC_LOGI " xq_whc_sync, $device_2g dev change channel $ch_2_act -> $ch_2 "
+        }
+    }
+
+    [ "$txp_2" != "$txp_2_cur" -o "$bw_2" != "$bw_2_cur" ] && {
+        son_changed=1
+        WHC_LOGI " xq_whc_sync, $device_2g dev change txp:bw $txp_2_cur:$bw_2_cur -> $txp_2:$bw_2 "
+        uci set wireless.$device_2g.txpwr="$txp_2"
+        uci set wireless.$device_2g.bw="$bw_2"
+    }
+
+    [ -n "$txbf_2" -a "$txbf_2" -ne "$txbf_2_cur" ] && {
+        son_changed=1
+        WHC_LOGI " xq_whc_sync, $device_2g dev change txbf [$txbf_2_cur] -> [$txbf_2]"
+        uci set wireless.$device_2g.txbf="$txbf_2"
+    }
+    [ -n "$ax_2" -a "$ax_2" -ne "$ax_2_cur" ] && {
+        son_changed=1
+        WHC_LOGI " xq_whc_sync, $device_2g dev change ax [$ax_2_cur] -> [$ax_2]"
+        uci set wireless.$device_2g.ax="$ax_2"
+    }
+
+    #reset 5g & game suffix, for RB08 CAP 5g iface swap
+    [ "$iface_5g_swap" = "1" ] && {
+        if [ "$bhdev" = "$BHTAG" ]; then
+            suffix_5g="5g_nbh"
+            suffix_game="5g"
+        else
+            suffix_5g="5g"
+            suffix_game="5g_nbh"
+        fi
+    }
+
+    # wifi-device parse - 5g
+    local txp_5="`cat $cfgf | grep -w "txpwr_${suffix_5g}" | awk -F ":=" '{print $2}'`"
+    local ch_5="`cat $cfgf | grep -w "ch_${suffix_5g}" | awk -F ":=" '{print $2}'`"
+    [ "$bhdev" != "$BHTAG" -a -z "$ch_5" ] && ch_5="0"
+    [ "auto" = "$ch_5" ] && ch_5="0"
+    [ "$ch_5" -lt 149 ] && ch_5="0"
+    local bw_5="`cat $cfgf | grep -w "bw_${suffix_5g}" | awk -F ":=" '{print $2}'`"
+    [ "$bhdev" != "$BHTAG" -a -z "$bw_5" ] && bw_5="0"
+    local txbf_5="`cat $cfgf | grep -w "txbf_${suffix_5g}" | awk -F ":=" '{print $2}'`"
+    local ax_5="`cat $cfgf | grep -w "ax_${suffix_5g}" | awk -F ":=" '{print $2}'`"
+
+
+    # wifi-device parse - game
+    local txp_game="`cat $cfgf | grep -w "txpwr_${suffix_game}" | awk -F ":=" '{print $2}'`"
+    local ch_game="`cat $cfgf | grep -w "ch_${suffix_game}" | awk -F ":=" '{print $2}'`"
+    [ "$bhdev" = "$BHTAG" -a -z "$ch_game" ] && ch_game="0"
+    [ "auto" = "$ch_game" ] && ch_game="0"
+    [ "$ch_game" -gt 64 ] && ch_game="0"
+    local bw_game="`cat $cfgf | grep -w "bw_${suffix_game}" | awk -F ":=" '{print $2}'`"
+    [ "$bhdev" = "$BHTAG" -a -z "$bw_game" ] && bw_game="0"
+    local txbf_game="`cat $cfgf | grep -w "txbf_${suffix_game}" | awk -F ":=" '{print $2}'`"
+    local ax_game="`cat $cfgf | grep -w "ax_${suffix_game}" | awk -F ":=" '{print $2}'`"
+
+
+    if [ "$bhdev" = "$BHTAG" ]; then
+        [ "$cap_is_dual_band" -eq 1 ] && {
+            #WHC_LOGE " xq_whc_sync, sync from a dual-radio device!"
+            txp_5="$txp_game"
+            ch_5=149
+            bw_5=0
+            txbf_5=$txbf_game
+            ax_5=$ax_game
+        }
+    else
+        [ "$cap_is_dual_band" -eq 1 ] && {
+            #WHC_LOGE " xq_whc_sync, sync from a dual-radio device!"
+            txp_game=$txp_5
+            ch_game=36
+            bw_game=0
+            txbf_game=$txbf_5
+            ax_game=$ax_5
+        }
+    fi
+
+
+    # wifi-device option - 5g
+    local txp_5_cur="`uci -q get wireless.$device_5g.txpwr`"
+    [ -z "$txp_5_cur" ] && txp_5_cur="max"
+    local ch_5_cur="`uci -q get wireless.$device_5g.channel`"
+    [ -z "$ch_5_cur" -o "auto" = "$ch_5_cur" ] && ch_5_cur="0"
+    local bw_5_cur="`uci -q get wireless.$device_5g.bw`"
+    [ -z "$bw_5_cur" ] && bw_5_cur=0
+    local txbf_5_cur="`uci -q get wireless.$device_5g.txbf`"
+    [ -z "$txbf_5_cur" ] && txbf_5_cur=3
+    local ax_5_cur="`uci -q get wireless.$device_5g.ax`"
+    [ -z "$ax_5_cur" ] && ax_5_cur=1
+    local support160="`cat $cfgf | grep -w "support160" | awk -F ":=" '{print $2}'`"
+
+    [ "$ch_5" != "$ch_5_cur" ] && {
+        uci set wireless.$device_5g.channel="$ch_5"
+        # check real channel, if SAME then should save one wifi reset
+        local ch_5_act="`iwlist $ifname_5g channel | grep -Eo "\(Channel.*\)" | grep -Eo "[1-9]+"`"
+        [ "$ch_5" != "$ch_5_act" ] && {
+            son_changed=1
+            WHC_LOGI " xq_whc_sync, $device_5g dev change channel $ch_5_act -> $ch_5 "
+        }
+    }
+
+    [ "$txp_5" != "$txp_5_cur" ] && {
+        son_changed=1
+        WHC_LOGI " xq_whc_sync, $device_5g dev change txp $txp_5_cur -> $txp_5"
+        uci set wireless.$device_5g.txpwr="$txp_5"
+    }
+
+    [ "$bw_5" != "$bw_5_cur" ] && {
+        son_changed=1
+        WHC_LOGI " xq_whc_sync, $device_5g dev change bw $bw_5_cur -> $bw_5"
+        uci set wireless.$device_5g.bw="$bw_5"
+    }
+
+    [ -n "$txbf_5" -a "$txbf_5" -ne "$txbf_5_cur" ] && {
+        son_changed=1
+        WHC_LOGI " xq_whc_sync, $device_5g dev change txbf [$txbf_5_cur] -> [$txbf_5]"
+        uci set wireless.$device_5g.txbf="$txbf_5"
+    }
+
+    [ -n "$ax_5" -a "$ax_5" -ne "$ax_5_cur" ] && {
+        son_changed=1
+        WHC_LOGI " xq_whc_sync, $device_5g dev change ax [$ax_5_cur] -> [$ax_5]"
+        uci set wireless.$device_5g.ax="$ax_5"
+    }
+
+    # wifi-device option - game
+    local txp_game_cur="`uci -q get wireless.$device_game.txpwr`"
+    [ -z "$txp_game_cur" ] && txp_game_cur="max"
+    local ch_game_cur="`uci -q get wireless.$device_game.channel`"
+    [ -z "$ch_game_cur" -o "auto" = "$ch_game_cur" ] && ch_game_cur="0"
+    local bw_game_cur="`uci -q get wireless.$device_game.bw`"
+    [ -z "$bw_game_cur" ] && bw_game_cur=0
+    local txbf_game_cur="`uci -q get wireless.$device_game.txbf`"
+    [ -z "$txbf_game_cur" ] && txbf_game_cur=3
+    local ax_game_cur="`uci -q get wireless.$device_game.ax`"
+    [ -z "$ax_game_cur" ] && ax_game_cur=1
+
+    [ "$ch_game" != "$ch_game_cur" ] && {
+        uci set wireless.$device_game.channel="$ch_game"
+        # check real channel, if SAME then should save one wifi reset
+        local ch_game_act="`iwlist $ifname_game channel | grep -Eo "\(Channel.*\)" | grep -Eo "[0-9]+"`"
+        [ "$ch_game" != "$ch_game_act" ] && {
+            son_changed=1
+            WHC_LOGI " xq_whc_sync, $device_game dev change channel $ch_game_act -> $ch_game "
+        }
+    }
+    [ "$txp_game" != "$txp_game_cur" ] && {
+        son_changed=1
+        WHC_LOGI " xq_whc_sync, $device_game dev change txp $txp_game_cur -> $txp_game"
+        uci set wireless.$device_game.txpwr="$txp_game"
+    }
+
+    [ "$bw_game" != "$bw_game_cur" ] && {
+        if [ "$bw_game" != "0" ]; then
+            son_changed=1
+            WHC_LOGI " xq_whc_sync, $device_game dev change bw $bw_game_cur -> $bw_game"
+            uci set wireless.$device_game.bw="$bw_game"
+        else
+            if [ "$support160" = "1" ]; then
+                son_changed=1
+                WHC_LOGI " xq_whc_sync, $device_game dev change bw $bw_game_cur -> $bw_game"
+                uci set wireless.$device_game.bw="$bw_game"
+            else
+                if [ "$bw_game_cur" != "80" ]; then
+                    if [ "$bhdev" = "$BHTAG" ] || [ "$cap_is_dual_band" -ne 1 ]; then
+                        son_changed=1
+                        WHC_LOGI " xq_whc_sync, cap do not support 160m, bh is game radio or cap is 9k, $bw_game_cur -> 80"
+                        uci set wireless.$device_game.bw='80'
+                    fi
+                else
+                    if [ "$bhdev" != "$BHTAG" ] && [ "$cap_is_dual_band" -eq 1 ]; then
+                        son_changed=1
+                        WHC_LOGI " xq_whc_sync, cap do not support 160m, bh is not game raido, $bw_game_cur -> 0"
+                        uci set wireless.$device_game.bw='0'
+                    fi
+                fi
+            fi
+        fi
+    }
+
+    [ -n "$txbf_game" -a "$txbf_game" -ne "$txbf_game_cur" ] && {
+        son_changed=1
+        WHC_LOGI " xq_whc_sync, $device_game dev change txbf [$txbf_game_cur] -> [$txbf_game]"
+        uci set wireless.$device_game.txbf="$txbf_game"
+    }
+
+    [ -n "$ax_game" -a "$ax_game" -ne "$ax_game_cur" ] && {
+        son_changed=1
+        WHC_LOGI " xq_whc_sync, $device_game dev change ax [$ax_game_cur] -> [$ax_game]"
+        uci set wireless.$device_game.ax="$ax_game"
+    }
+
+    #iot switch
+    local iot_switch_cur="`uci -q get wireless.miot_2G.userswitch`"
+    [ -z "$iot_switch_cur" ] && iot_switch_cur=1
+    local iot_switch="`cat $cfgf | grep -w "iot_switch" | awk -F ":=" '{print $2}'`"
+    [ -n "$iot_switch" -a "$iot_switch" -ne "$iot_switch_cur" ] && {
+        iot_switch_changed=1
+        WHC_LOGI " xq_whc_sync, iot user switch changed [$iot_switch_cur] -> [$iot_switch]"
+        uci set wireless.miot_2G.userswitch="$iot_switch"
+    }
+
+    uci commit wireless && sync
+    return 0;
+}
+
+guest_parse()
+{
+    local gst_sect="guest"
+
+    local disab="`cat $cfgf | grep -w "gst_disab" | awk -F ":=" '{print $2}'`"
+    [ -z "$disab" ] && disab=0
+    local ssid_enc="`cat $cfgf | grep -w "gst_ssid" | awk -F ":=" '{print $2}'`"
+    local pswd_enc="`cat $cfgf | grep -w "gst_pswd" | awk -F ":=" '{print $2}'`"
+    local ssid="$ssid_enc"
+    local pswd="$pswd_enc"
+    if [ "$USE_ENCODE" -gt 0 ]; then
+        ssid="$(base64_dec "$ssid_enc")"
+        pswd="$(base64_dec "$pswd_enc")"
+    fi
+    local mgmt="`cat $cfgf | grep -w "gst_mgmt" | awk -F ":=" '{print $2}'`"
+
+    [ -z "$ssid" ] && {
+        WHC_LOGE " xq_whc_sync, guest options invalid ignore!"
+        cp "$cfgf" "$cfgf_fake"
+        return 1
+    }
+
+    local device_5g=$(uci -q get misc.wireless.if_5G)
+
+    # if guest section no exist, create first
+    local disab_cur=0
+    local ssid_cur=""
+    local pswd_cur=""
+    local mgmt_cur=""
+
+    if uci -q get wireless.$gst_sect >/dev/null 2>&1; then
+        disab_cur="`uci -q get wireless.$gst_sect.disabled`"
+        [ -z "$disab_cur" ] && disab_cur=0;
+        ssid_cur="`uci -q get wireless.$gst_sect.ssid`"
+        pswd_cur="`uci -q get wireless.$gst_sect.key`"
+        mgmt_cur="`uci -q get wireless.$gst_sect.encryption`"
+    else
+        WHC_LOGI " xq_whc_sync, guest section newly add, TODO son options"
+        disab_cur=1;
+        uci set wireless.$gst_sect=wifi-iface
+        uci set wireless.$gst_sect.device="$device_5g"
+        uci set wireless.$gst_sect.mode='ap'
+        uci set wireless.$gst_sect.ifname='wl3'
+        ##### TODO, guest iface options
+    fi
+
+    [ "$ssid_cur" != "$ssid" ] && {
+        son_changed=1
+        WHC_LOGI " xq_whc_sync, guest ssid change $ssid_cur -> $ssid"
+        #uci set wireless.$gst_sect.ssid="$ssid"
+    }
+    [ "$pswd_cur" != "$pswd" ] && {
+        son_changed=1
+        WHC_LOGI " xq_whc_sync, guest pswd change $pswd_cur -> $pswd"
+        uci set wireless.$gst_sect.key="$pswd"
+    }
+    [ "$mgmt_cur" != "$mgmt" ] && {
+        son_changed=1
+        WHC_LOGI " xq_whc_sync, guest mgmt change $mgmt_cur -> $mgmt"
+        uci set wireless.$gst_sect.encryption="$mgmt"
+    }
+    
+    if [ "$disab_cur" != "$disab" ]; then
+        son_changed=1
+        WHC_LOGI " xq_whc_sync, guest disab change $disab_cur -> $disab"
+        uci set wireless.$gst_sect.disabled="$disab"
+    else
+        [ "$disab" = 1 -a "$son_changed" -gt 0 ] && {
+            WHC_LOGI " xq_whc_sync, guest disab, with option change, ignore reset"
+            son_changed=0
+        }
+    fi
+
+    uci commit wireless && sync
+
+    return 0
+}
+
+system_parse()
+{
+    local timezone="`cat $cfgf | grep -w "timezone" | awk -F ":=" '{print $2}'`"
+    local timezone_cur="`uci -q get system.@system[0].timezone`"
+    [ "$timezone_cur" != "$timezone" ] && {
+        sys_changed=1
+        WHC_LOGI " xq_whc_sync, system timezone change $timezone_cur -> $timezone"
+        [ -f "/sbin/sync_tz.lua" ] && /sbin/sync_tz.lua $timezone
+    }
+
+    local ota_auto="`cat $cfgf | grep -w "ota_auto" | awk -F ":=" '{print $2}'`"
+    [ -z "$ota_auto" ] && ota_auto=0
+    local ota_auto_cur="`uci -q get otapred.settings.auto`"
+    [ -z "$ota_auto_cur" ] && ota_auto_cur=0
+    local ota_time="`cat $cfgf | grep -w "ota_time" | awk -F ":=" '{print $2}'`"
+    local ota_time_cur="`uci -q get otapred.settings.time`"
+    [ -z "$ota_time_cur" ] && ota_time_cur=4
+    [ "$ota_auto" != "$ota_auto_cur" -o "$ota_time" != "$ota_time_cur" ] && {
+        sys_changed=1
+        WHC_LOGI " xq_whc_sync, system ota change $ota_auto_cur,$ota_time_cur -> $ota_auto,$ota_time"
+        uci set otapred.settings.auto="$ota_auto"
+        uci set otapred.settings.time="$ota_time"
+        uci commit otapred
+    }
+
+    local led_blue="`cat $cfgf | grep -w "led_blue" | awk -F ":=" '{print $2}'`"
+    [ -z "$led_blue" ] && led_blue=1
+    local led_blue_cur="`uci -q get xiaoqiang.common.BLUE_LED`"
+    [ -z "$led_blue_cur" ] && led_blue_cur=1
+    [ "$led_blue" != "$led_blue_cur" ] && {
+        sys_changed=0
+        WHC_LOGI " xq_whc_sync, system led change $led_blue_cur -> $led_blue"
+        uci set xiaoqiang.common.BLUE_LED="$led_blue"
+        uci commit xiaoqiang
+        if [ "$led_blue" -eq 0 ]; then
+            xqled sys_off
+            xqled link_down
+            /etc/init.d/wan_check stop
+        else
+            xqled sys_ok
+            xqled link_conned
+            /etc/init.d/wan_check start
+        fi
+    }
+
+    return 0
+}
+
+miscan_parse()
+{
+    local miscan_enable="`cat $cfgf | grep -w "miscan_enable" | awk -F ":=" '{print $2}'`"
+    local miscan_enable_cur="`uci -q get miscan.config.enabled`"
+    [ "$miscan_enable_cur" != "$miscan_enable" ] && {
+        miscan_changed=1
+        WHC_LOGI " xq_whc_sync, miscan status change $miscan_enable_cur -> $miscan_enable"
+        uci set miscan.config.enabled="$miscan_enable"
+        uci commit miscan
+    }
+
+    return 0
+}
+
+bak_config()
+{
+    cp "$cfgf_origin" "$cfgf"
+}
+
+clean_config()
+{
+    rm "$cfgf"
+}
+
+bak_config
+
+# must call guest_parse first
+[ "$SUPPORT_GUEST_ON_RE" -gt 0 ] && {
+    guest_parse
+    local guest_ret=$?
+    if [ "$guest_ret" -gt 0 ]; then
+        clean_config
+        exit $guest_ret
+    fi
+}
+wifi_parse
+wifi_ret=$?
+if [ "$wifi_ret" -gt 0 ]; then
+    clean_config
+    return $wifi_ret
+fi
+system_parse
+miscan_parse
+
+if [ "$miscan_changed" -gt 0 ]; then
+    WHC_LOGI " xq_whc_sync, miscan_changed, restart miscan!"
+    (/etc/init.d/scan restart) &
+fi
+
+if [ "$iot_switch_changed" -gt 0 ]; then
+    WHC_LOGI " xq_whc_sync, iot user switch changed!"
+    userswitch="`uci -q get wireless.miot_2G.userswitch`"
+    miot_2g_ifname="`uci -q get misc.wireless.iface_miot_2g_ifname`"
+    bindstatus="`uci -q get wireless.miot_2G.bindstatus`"
+    miot_2g_device="`uci -q get wireless.miot_2G.device`"
+    if [ "$bindstatus" = "1" ]; then
+        if [ "$userswitch" != "0" ]; then
+            hostapd_cli -i "$miot_2g_ifname" -p /var/run/hostapd-$miot_2g_device enable
+        else
+            hostapd_cli -i "$miot_2g_ifname" -p /var/run/hostapd-$miot_2g_device disable
+        fi
+    fi
+fi
+
+if [ "$sys_changed" -gt 0 ]; then
+    WHC_LOGI " xq_whc_sync, sys_changed, restart ntp!"
+    # wait son update and reconnect
+    if [ "$son_changed" -gt 0 ]; then
+        (sleep 60; ntpsetclock now) &
+    else
+        (ntpsetclock now) &
+    fi
+fi
+
+
+if [ "$son_changed" -gt 0 ]; then
+        ( lock "$xqwhc_lock";
+        wifi;
+        lock -u "$xqwhc_lock" ) &
+else
+    WHC_LOGD " xq_whc_sync, son NO change!"
+fi
+
+clean_config

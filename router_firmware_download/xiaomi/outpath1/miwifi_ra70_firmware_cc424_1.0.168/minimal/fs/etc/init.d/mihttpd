@@ -1,0 +1,63 @@
+#!/bin/sh /etc/rc.common
+
+START=22
+
+USE_PROCD=1
+
+FCG_PROCESS_NUM="2"
+NGINX="/usr/sbin/mihttpd"
+SPAWN_FCGI="/usr/bin/spawn-fcgi"
+FCGI="/usr/bin/fcgi-cgi"
+FCGI_PORT="8960"
+CONFIG_FILE="/etc/mihttpd/mihttpd.conf"
+
+env_init() {
+  echo "env_init"
+  mkdir -p /tmp/mihttpd/lock
+
+  mkdir -p /tmp/mihttpd/
+  mkdir -p /tmp/mihttpd/body
+  mkdir -p /tmp/mihttpd/cache
+  mkdir -p /tmp/mihttpd/fastcgi
+  mkdir -p /tmp/mihttpd/inforoot
+  mkdir -p /tmp/mihttpd/log
+  mkdir -p /tmp/mihttpd/luaroot
+  mkdir -p /tmp/mihttpd/preload
+  mkdir -p /tmp/mihttpd/proxy
+  mkdir -p /tmp/mihttpd/run
+  mkdir -p /tmp/mihttpd/temp
+  chmod -R 777 /tmp/mihttpd
+}
+
+start_service() {
+
+  env_init
+  # start fcgi-cgi first
+  procd_open_instance
+  procd_set_param command $SPAWN_FCGI -a 127.0.0.1 -p $FCGI_PORT -U nobody -C 0 -F $FCG_PROCESS_NUM -- $FCGI -c 2
+  procd_set_param respawn
+  procd_close_instance
+  echo "start fcgi-cgi by spawn-fcgi."
+
+  procd_open_instance
+  procd_set_param command $NGINX -c $CONFIG_FILE
+  procd_set_param file $CONFIG_FILE
+  procd_set_param respawn
+  procd_close_instance
+  echo "start nginx ok."
+}
+
+stop_service() {
+  # stop nginx first
+  service_stop $NGINX
+  echo "stop nginx by procd ok."
+
+  # stop fcgi-cgi
+  # service_stop $FCGI
+  echo "stop fcgi-cgi ok."
+}
+
+stop_fcgi() {
+  killall -s 9 fcgi-cgi >/dev/null 2>&1
+  killall -s 9 luci >/dev/null 2>&1
+}

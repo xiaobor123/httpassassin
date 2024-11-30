@@ -1,0 +1,126 @@
+#!/bin/sh
+# Turn on/off led if configured,$1(1:red,2:yellow,3:blue),$2(0:on,1:off)
+# trigger led cmd: gpio l 20000 1 ,$1:trigger, $2:Cycle(udelay), $3:(1:red,2:yellow,3:blue)
+
+# l mean led trigger
+usage() {
+	cat <<EOF
+usage: set GPIO: gpio <pin> <value>[1/0]
+       get GPIO: gpio <pin>
+       blink GPIO: gpio l <interval> <pin>[1/2/3]
+EOF
+}
+
+if [ "$1" = "l" ]; then
+	case $# in
+		3 )
+			;;
+		* )
+			usage
+			exit 255
+		;;
+	esac
+
+	case $3 in
+		2 )
+			label="led_yellow"
+			echo "none" > /sys/class/leds/led_blue/trigger
+			echo 0 > /sys/class/leds/led_blue/brightness
+			;;
+		3 )
+			label="led_blue"
+			echo "none" > /sys/class/leds/led_yellow/trigger
+			echo 0 > /sys/class/leds/led_yellow/brightness
+			;;
+        4 )
+            label="net_yellow"
+            echo "none" > /sys/class/leds/net_blue/trigger
+            echo 0 > /sys/class/leds/net_blue/brightness
+            ;;
+        5 )
+            label="net_blue"
+            echo "none" > /sys/class/leds/net_yellow/trigger
+            echo 0 > /sys/class/leds/net_yellow/brightness
+            ;;
+
+		* )
+			usage
+			exit 255
+	esac
+
+	echo "timer" > /sys/class/leds/${label}/trigger
+	echo $2 > /sys/class/leds/${label}/delay_on
+	echo $2 > /sys/class/leds/${label}/delay_off
+else
+	case $# in
+		1 | 2 )
+			;;
+		* )
+			usage
+			exit 255
+			;;
+	esac
+	
+	case $1 in
+                6 | 7 | 8)
+                ft_mode=`cat /proc/xiaoqiang/ft_mode`
+                if [ "$ft_mode" != "1" ]; then
+                        exit 255
+                fi
+                ;;
+        esac
+	
+	case $1 in
+		1 )
+			label="led_red"
+			;;
+		2 )
+			label="led_yellow"
+			;;
+		3 )
+			label="led_blue"
+			;;
+		4 )
+			label="net_yellow"
+			;;
+		5 )
+			label="net_blue"
+			;;
+		6 )
+			label=0
+			;;
+		7 )
+			label=1
+			;;
+		8 )
+			label=2
+			;;
+		* )
+			exit 255
+			;;
+	esac
+
+	[ $# -eq 1 ] && {
+		val=$((!$(cat /sys/class/leds/${label}/brightness)))
+		echo "gpio <$1>: <$val>"
+	}
+
+	[ $# -eq 2 ] && {
+		case $1 in
+			2 | 3 | 4 | 5)
+				echo "none" > /sys/class/leds/${label}/trigger
+				echo $((!$2)) > /sys/class/leds/${label}/brightness
+				;;
+			6 | 7 | 8)
+				[ -d /sys/class/pwm/pwmchip0/pwm${label} ] || echo ${label} > /sys/class/pwm/pwmchip0/export
+				echo 1000000 > /sys/class/pwm/pwmchip0/pwm${label}/period
+				echo 200000 > /sys/class/pwm/pwmchip0/pwm${label}/duty_cycle
+				echo $2 > /sys/class/pwm/pwmchip0/pwm${label}/enable
+				;;
+			1 )
+				echo $((!$2)) > /sys/class/leds/led_yellow/brightness
+				echo $((!$2)) > /sys/class/leds/led_blue/brightness
+				;;
+		esac
+	}
+fi

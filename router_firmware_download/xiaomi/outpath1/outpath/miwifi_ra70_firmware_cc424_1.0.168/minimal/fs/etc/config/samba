@@ -1,0 +1,5 @@
+config samba
+	option 'name'			'XIAO.MI'
+	option 'workgroup'		'WORKGROUP'
+	option 'description'		'Share from router'
+	option 'homes'			'1'

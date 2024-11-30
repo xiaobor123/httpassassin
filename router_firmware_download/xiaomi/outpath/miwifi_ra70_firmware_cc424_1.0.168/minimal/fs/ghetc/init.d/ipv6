@@ -1,0 +1,261 @@
+#!/bin/sh /etc/rc.common
+
+#such ipv6 enable should be invoked before other-settings
+
+START=58
+
+EXTRA_COMMANDS=" native static nat off set_mode set_dns start_ipv6 restart_lan ip6_fw"
+EXTRA_HELP="
+    start/stop
+    off
+    native
+    native dns1,dns2
+    static ip6-addr ip6-gateway ip6-prefix
+    static ip6-addr ip6-gateway ip6-prefix ip6-assign
+    static ip6-addr ip6-gateway ip6-prefix ip6-assign dns1,dns2
+    nat
+    nat dns1,dns2
+"
+#as default, we will enable ipv6 on LAN
+CMD="/usr/sbin/enable_ipv6"
+
+boot() {
+    local ap_mode=$(uci -q get xiaoqiang.common.NETMODE)
+    if [ "$ap_mode" = "wifiapmode" -o "$ap_mode" = "lanapmode" -o "$ap_mode" = "whc_re" ]; then
+        return 0
+    fi
+
+    local flag=$(uci -q get ipv6.settings.enabled)
+    local mode=$(uci -q get ipv6.settings.mode)
+
+    #try to fix config crupt
+    [ -z "$mode" -o -z "$flag" ] && {
+        mode="off"
+        flag="0"
+        set_mode off
+        $CMD wan off
+        $CMD wan reload_network
+    }
+
+    return 0
+}
+
+start() {
+    local ap_mode=$(uci -q get xiaoqiang.common.NETMODE)
+    if [ "$ap_mode" = "wifiapmode" -o "$ap_mode" = "lanapmode" -o "$ap_mode" = "whc_re" ]; then
+        /etc/init.d/odhcpd stop
+        return 0
+    fi
+
+    local flag=$(uci -q get ipv6.settings.enabled)
+    local mode=$(uci -q get ipv6.settings.mode)
+
+    #try to fix config crupt
+    [ -z "$mode" -o -z "$flag" ] && {
+        mode="off"
+        flag="0"
+        set_mode off
+        $CMD wan off
+        $CMD wan reload_network
+    }
+    [ "$flag" = "0" -o "$mode" = "off" ] && return 0
+
+    $CMD wan wan6_on
+    start_ipv6 $mode
+
+    return 0
+}
+
+stop() {
+    $CMD wan wan6_off
+    $CMD wan reload_network
+    return 0
+}
+
+restart() {
+    stop
+    start
+}
+
+ip6_fw() {
+    [ "$1" != "close" -a "$1" != "open" ] && return
+
+    local flag=$(uci -q get ipv6.settings.enabled)
+    local mode=$(uci -q get ipv6.settings.mode)
+
+    if [ "$1" = "close" ]; then
+        uci -q set firewall.@defaults[0].disable_ipv6=1
+    elif [ "$flag" != "0" -a "$mode" != "off" ]; then
+        uci -q set firewall.@defaults[0].disable_ipv6=0
+    fi
+    uci -q commit firewall
+}
+
+update_dns6() {
+    local peerdns=$(uci -q get ipv6.dns.peerdns)
+    local dns_list=$(uci -q get ipv6.dns.dns)
+
+    if [ "$1" != "pppoe" ]; then
+        [ "$peerdns" == "1" -o -z "$dns_list" ] && $CMD wan dns || $CMD wan dns $dns_list
+    else
+        if [ "$2" != "static" ]; then
+            [ "$peerdns" == "1" -o -z "$dns_list" ] && $CMD wan pppoe_dns $2 || $CMD wan pppoe_dns $2 $dns_list
+        else
+            [ "$peerdns" == "1" -o -z "$dns_list" ] && $CMD wan pppoe_dns $2 $3 $4 || $CMD wan pppoe_dns $2 $3 $4 $dns_list
+        fi
+    fi
+}
+
+start_ipv6() {
+    [ "$1" != "static" -a "$1" != "native" -a "$1" != "nat" ] && return
+
+    local proto_v4=$(uci -q get network.wan.proto)
+    local mode_old=$2
+    local odhcpd_exist=$(ps | grep odhcpd | grep -v grep | wc -l)
+    [ "$odhcpd_exist" = "0" ] && /etc/init.d/odhcpd start
+
+    case "$1" in
+    "native"|"nat")
+        $CMD wan $1
+        update_dns6 "$proto_v4" "$1"
+        ;;
+
+    "static")
+        ip6addr=$(uci -q get ipv6.settings.ip6addr)
+        ip6gw=$(uci -q get ipv6.settings.ip6gw)
+        ip6prefix=$(uci -q get ipv6.settings.ip6prefix)
+        ip6assign=$(uci -q get ipv6.settings.ip6assign)
+        $CMD wan static "${ip6addr}" "${ip6gw}" "${ip6prefix}" "${ip6assign}"
+        update_dns6 "$proto_v4" "$1" "${ip6addr}" "${ip6gw}"
+        ;;
+
+    esac
+	
+     if [ "$1" = "native" ]; then
+        firewall=$(uci -q get ipv6.settings.firewall)
+        if [ -z "$firewall" -o "$firewall" = "0" ]; then
+            uci -q set firewall.@defaults[0].disable_ipv6=1
+        else
+            uci -q set firewall.@defaults[0].disable_ipv6=0
+        fi
+    else
+        uci -q set firewall.@defaults[0].disable_ipv6=0
+    fi
+    uci -q commit firewall
+    $CMD wan reload_network $mode_old
+
+    return 0
+}
+
+set_mode() {
+	local mode_old=$(uci -q get ipv6.settings.mode)
+	local mode_cur=$1
+
+    case "$mode_cur" in
+    "off")
+        uci -q batch <<EOF
+        set ipv6.settings.enabled="0"
+        set ipv6.settings.mode="off"
+        set ipv6.dns=dns
+        set ipv6.dns.peerdns="1"
+        commit ipv6
+EOF
+	uci -q set firewall.@defaults[0].disable_ipv6=1
+	uci -q commit firewall
+        ;;
+
+    "native")
+        dns_list=$2
+        [ -z "$dns_list" ] && peerdns="1" || peerdns="0"
+
+        uci -q batch <<EOF
+        set ipv6.settings.enabled="1"
+        set ipv6.settings.mode="$mode_cur"
+        set ipv6.dns=dns
+        set ipv6.dns.peerdns="$peerdns"
+        set ipv6.dns.dns="$dns_list"
+        commit ipv6
+EOF
+        ;;
+
+   "nat")
+        dns_list=$2
+        [ -z "$dns_list" ] && peerdns="1" || peerdns="0"
+
+        uci -q batch <<EOF
+        set ipv6.settings.enabled="1"
+        set ipv6.settings.mode="$mode_cur"
+	set ipv6.settings.ip6prefix="fd00:6868:6868::1"
+        set ipv6.dns=dns
+        set ipv6.dns.peerdns="$peerdns"
+        set ipv6.dns.dns="$dns_list"
+        commit ipv6
+EOF
+        ;;
+
+    "static")
+        ip6addr=$2
+        ip6gw=$3
+        ip6prefix=$4
+        ip6assign=$5
+        dns_list=$6
+        [ -z "$ip6addr" -o -z "$ip6gw" -o -z "$ip6prefix" -o -z "$ip6assign" ] && {
+			echo 1 && return
+		}
+        [ -z "$ip6assign" ] && ip6assign="64"
+        [ -z "$dns_list" ] && peerdns="1" || peerdns="0"
+		local ip6prefix_old=$(uci -q get ipv6.settings.ip6prefix)
+
+        uci -q batch <<EOF
+        set ipv6.settings.enabled="1"
+        set ipv6.settings.mode="static"
+        set ipv6.settings.ip6addr=$ip6addr
+        set ipv6.settings.ip6gw=$ip6gw
+        set ipv6.settings.ip6prefix=$ip6prefix
+        set ipv6.settings.ip6assign=$ip6assign
+        set ipv6.dns=dns
+        set ipv6.dns.peerdns="$peerdns"
+        set ipv6.dns.dns="$dns_list"
+        commit ipv6
+EOF
+        [ -n "$ip6prefix_old" -a "$ip6prefix_old" != "$ip6prefix" ] && echo 0 && return
+        ;;
+
+    esac
+
+    [ -n "$mode_old" -a "$mode_old" != "$mode_cur" ] && echo 0 || echo 1
+}
+
+restart_lan() {
+    /usr/sbin/phyhelper restart
+
+}
+
+native() {
+    local mode_old=$(uci -q get ipv6.settings.mode)
+    local mode_chg=$(set_mode native $@)
+    start_ipv6 native $mode_old
+	[ "$mode_chg" == "0" ] && restart_lan
+}
+
+static() {
+    local mode_old=$(uci -q get ipv6.settings.mode)
+    local mode_chg=$(set_mode static $@)
+    start_ipv6 static $mode_old
+	[ "$mode_chg" == "0" ] && restart_lan
+}
+
+nat() {
+    local mode_old=$(uci -q get ipv6.settings.mode)
+    local mode_chg=$(set_mode nat $@)
+    start_ipv6 nat $mode_old
+	[ "$mode_chg" == "0" ] && restart_lan
+}
+
+off() {
+    local mode_old=$(uci -q get ipv6.settings.mode)
+    local mode_chg=$(set_mode off)
+    $CMD wan off
+    $CMD wan reload_network $mode_old
+	[ "$mode_chg" == "0" ] && restart_lan
+}

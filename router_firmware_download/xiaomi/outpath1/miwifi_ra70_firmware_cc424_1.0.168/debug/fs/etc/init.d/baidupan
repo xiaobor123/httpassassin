@@ -1,0 +1,51 @@
+#!/bin/sh /etc/rc.common
+# Copyright (C) 2006 OpenWrt.org
+
+START=99
+NAME=baidupan
+USE_PROCD=1
+PROG=/usr/sbin/baidupan
+
+init_baidupan() {
+    dis=$(df -h | grep extdisks | awk '{print $6}' | sed -n '1p')
+
+    [ -z "$dis" ] && {
+        echo "error: please install USB" >> /tmp/messages
+        exit -1
+    }
+
+    [ -d "$dis/.baidupan/tmp" ] && {
+        rm -rf $dis/.baidupan/tmp
+    }
+
+    mkdir -p $dis/.baidupan/tmp
+
+    [ -d "/tmp/baidupan" ] && {
+        rm -rf /tmp/baidupan
+    }
+
+    mkdir -p /tmp/baidupan
+
+    /usr/sbin/kill_baidupan.sh
+    #/usr/bin/lua /usr/sbin/baidupan.lua init
+
+}
+
+start_service(){
+    init_baidupan
+
+    [ -f "$PROG" ] && {
+	    procd_open_instance
+	    procd_set_param command ${PROG}
+	    procd_set_param respawn
+	    procd_close_instance
+    }
+}
+
+stop_service() {
+    service_stop ${PROG}
+}
+
+restart_service() {
+    service_reload ${PROG}
+}

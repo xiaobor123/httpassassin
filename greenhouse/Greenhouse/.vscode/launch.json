@@ -1,0 +1,16 @@
+{
+    // Use IntelliSense to learn about possible attributes.
+    // Hover to view descriptions of existing attributes.
+    // For more information, visit: https://go.microsoft.com/fwlink/?linkid=830387
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "greenhouse debug",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "/home/liuweijun/HttpdAssassin/greenhouse/Greenhouse/gh.py",
+            "console": "integratedTerminal",
+            "args": "--outpath /home/liuweijun/HttpdAssassin/router_firmware_download/xiaomi/outpath --workspace /home/liuweijun/HttpdAssassin/router_firmware_download/xiaomi/workspace --logpath=/home/liuweijun/HttpdAssassin/router_firmware_download/xiaomi/log --cache_path=/home/liuweijun/HttpdAssassin/router_firmware_download/xiaomi/cache_path --ip 192.168.5.1 --ports=80 --max_cycles=25 -rh --brand=xiaomi --img_path=/home/liuweijun/HttpdAssassin/router_firmware_download/xiaomi/miwifi_ra70_firmware_cc424_1.0.168.bin --target_bin=/home/liuweijun/HttpdAssassin/router_firmware_download/xiaomi/workspace/xiaomi/_miwifi_ra70_firmware_cc424_1.0.168.bin.extracted/ubifs-root/2B4.ubi/_img-870537086_vol-ubi_rootfs.ubifs.extracted/squashfs-root/usr/sbin/sysapihttpd"
+        }
+    ]
+}

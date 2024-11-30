@@ -1,0 +1,24 @@
+#!/bin/sh /etc/rc.common
+# Copyright (C) 2006 OpenWrt.org 
+
+START=30
+
+#Add dynamic crontab entry.Better before crond is started
+
+fixup_ota_dl() {
+	grep "otapredownload" /etc/crontabs/root  | grep "3,4 " -q
+	[ "$?" = "0" ] && return 0
+
+	base=`head -n 10 /dev/urandom | md5sum | cut -c 1-4`
+	min=`echo $(($((0x$base))%60))`
+
+	sed -i '/otapredownload/d' /etc/crontabs/root
+
+	echo "$min 3,4 * * * /usr/sbin/otapredownload >/dev/null 2>&1" >> /etc/crontabs/root
+}
+
+start() {
+	fixup_ota_dl
+
+	return 0
+}

@@ -1,0 +1,9 @@
+version: "2.2"
+
+services:
+  gh_rehosted:
+    build: .
+    privileged: true
+    ports:
+      - 80:80/tcp
+      - 80:80/udp

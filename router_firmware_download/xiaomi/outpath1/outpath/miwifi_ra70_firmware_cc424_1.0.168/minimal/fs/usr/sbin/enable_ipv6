@@ -1,0 +1,364 @@
+#!/bin/sh
+# example:
+# enable_ipv6 wan off
+# enable_ipv6 wan native
+# enable_ipv6 wan static ip6addr ip6gw ip6prefix ip6assign
+# enable_ipv6 wan nat
+
+usage() {
+    echo "usage:
+ enable_ipv6 wan off
+ enable_ipv6 wan native
+ enable_ipv6 wan static ip6addr ip6gw ip6prefix ip6assign
+ enable_ipv6 wan nat 
+ enable_ipv6 wan dns off
+ enable_ipv6 wan dns on dns-list
+"
+}
+
+loginfo() {
+    msg="$@"
+    [ -z "$msg" ] && return 0
+
+    DATE="$(date)"
+    logger -t "enable_ipv6[${$}]" "$msg"
+    return 0
+}
+
+logerr() {
+    msg="$@"
+    [ -z "$msg" ] && return 0
+
+    DATE="$(date)"
+    logger -p9 -t "enable_ipv6[${$}]" "$msg"
+    return 0
+}
+
+iface=$1
+action=$2
+ip6addr=$3
+ip6gw=$4
+ip6prefix=$5
+ip6assign=$6
+
+[ -z "$iface" ] && {
+    logerr "ERROR: iface canot be NULL. exit."
+    exit 0
+}
+wan_iface=$(uci -q get network.${iface}.ifname)
+proto_type=$(uci -q get network.${iface}.proto)
+
+case ${action} in
+"off")
+    loginfo "INFO: try to off router [IPv6-mode]."
+    ## clean wan and clean lan
+    uci -q batch <<EOF
+        delete network.globals
+	delete network.${iface}_6
+	del_list network.lan.ip6class=${iface}_6
+        delete network.lan.ip6addr
+	delete network.lan.ip6assign
+        set network.${iface}.ipv6=0
+	set network.lan.ipv6='0'
+	commit network
+EOF
+    ;;
+
+"static")
+    ## set wan to static and set lan to static prefix set.
+    [ -z "$ip6addr" ] && {
+        logerr "ERROR: [Static6-mode] ip6addr is NULL. exit."
+        return 0
+    }
+    [ -z "$ip6gw" ] && {
+        logerr "ERROR: [Static6-mode] ip6gw is NULL. exit."
+        return 0
+    }
+    [ -z "$ip6prefix" ] && {
+        logerr "ERROR: [Static6-mode] ip6prefix is NULL. exit."
+        return 0
+    }
+    [ -z "$ip6assign" ] && {
+        logerr "WARN: [Static6-mode] ip6assign is NULL, set 64 as default."
+        ip6assign="64"
+    }
+
+    loginfo "INFO: try to set router to [Static6-mode]."
+
+	if [ "$proto_type" = "pppoe" ]; then
+		uci -q batch <<EOF
+			delete network.globals
+			delete network.${iface}_6
+			delete network.lan.ip6addr
+			del_list network.lan.ip6class=${iface}_6
+			add_list network.lan.ip6class=${iface}_6
+			set network.lan.ip6assign=${ip6assign}
+			set network.lan.ip6addr=${ip6prefix}
+			set network.lan.ipv6='1'
+			set network.${iface}.ipv6="auto"
+			commit network
+EOF
+	else
+		uci -q batch <<EOF
+			delete network.globals
+			delete network.${iface}.ipv6
+			delete network.${iface}_6
+			del_list network.lan.ip6class=${iface}_6
+			set network.${iface}_6=interface
+			set network.${iface}_6.ifname=${wan_iface}
+			set network.${iface}_6.proto=static
+			set network.${iface}_6.ip6assign=no
+			set network.${iface}_6.ip6addr=${ip6addr}
+			set network.${iface}_6.ip6gw=${ip6gw}
+			add_list network.lan.ip6class=${iface}_6
+			set network.lan.ip6assign=${ip6assign}
+			set network.lan.ip6addr=${ip6prefix}
+			set network.lan.ipv6='1'
+			commit network
+EOF
+	fi
+    ;;
+
+"native")
+    [ -z "$ip6assign" ] && {
+        logerr "WARN: [Native6-mode] ip6assign is NULL, set 64 as default."
+        ip6assign="64"
+    }
+
+    loginfo "INFO: try to set router to [Native6-mode]."
+
+    ## for pppoe ipv6, must set ipv6=auto
+    if [ "$proto_type" = "pppoe" ]; then
+        uci -q batch <<EOF
+	delete network.globals
+        delete network.${iface}_6
+        delete network.lan.ip6addr
+        del_list network.lan.ip6class=${iface}_6
+        set network.${iface}.ipv6="auto"
+        set network.lan.ip6assign=${ip6assign}
+        set network.lan.ipv6='1'
+        commit network
+EOF
+    else
+        #set wan to dhcpv6 and set lan to static prefix set
+        uci -q batch <<EOF
+        delete network.globals
+	delete network.${iface}_6
+        delete network.lan.ip6addr
+	del_list network.lan.ip6class=${iface}_6
+        delete network.${iface}.ipv6
+	set network.${iface}_6=interface
+	set network.${iface}_6.ifname=${wan_iface}
+	set network.${iface}_6.proto=dhcpv6
+	set network.${iface}_6.reqaddress=try
+	set network.${iface}_6.reqprefix=auto
+	set network.lan.ip6assign=${ip6assign}
+	set network.lan.ipv6='1'
+	commit network
+EOF
+    fi
+    ;;
+
+"nat")
+    ## set WAN to dhcpv6 and set lan to static assuming ULA
+    [ -z "$ip6assign" ] && {
+        logerr "WARN: [NAT6-mode] ip6assign is NULL, set 64 as default."
+        ip6assign="64"
+    }
+
+    loginfo "INFO: try to set router to [NAT6-mode]."
+
+	if [ "$proto_type" = "pppoe" ]; then
+		loginfo "INFO: [NAT6-mode] ip6addr and  ip6gw is NULL. Set WAN to PPPoE6 proto and LAN to NAT static-ULA."
+		uci -q batch <<EOF
+		delete network.globals
+		delete network.${iface}_6
+		delete network.lan.ip6addr
+		del_list network.lan.ip6class=${iface}_6
+		set network.lan.ipv6='1'
+		set network.lan.ip6assign=${ip6assign}
+		set network.${iface}.ipv6="auto"
+		commit network
+EOF
+	else
+		loginfo "INFO: [NAT6-mode] ip6addr and  ip6gw is NULL. Set WAN to DHCP6 proto and LAN to NAT static-ULA."
+		uci -q batch <<EOF
+		delete network.globals
+		delete network.${iface}_6
+		delete network.lan.ip6addr
+		del_list network.lan.ip6class=${iface}_6
+		set network.lan.ipv6='1'
+		set network.lan.ip6assign=${ip6assign}
+		set network.${iface}_6=interface
+		set network.${iface}_6.ifname=${wan_iface}
+		set network.${iface}_6.proto=dhcpv6
+		set network.${iface}.ipv6="auto"
+		commit network
+EOF
+    fi
+    ;;
+
+"dns")
+	[ "$proto_type" == "pppoe" ] && return
+    loginfo "INFO: update DNS config."
+
+    dnslist=$3
+    peerdns="1"
+    [ -n "$dnslist" ] && peerdns="0"
+
+	if [ "$peerdns" == "1" ]; then
+		uci -q batch <<EOF
+		delete network.${iface}_6.dns
+		delete network.${iface}_6.peerdns
+		commit network
+EOF
+	else
+		uci -q set network.${iface}_6.peerdns="0"
+		#split dns server list
+		var=${dnslist//,/ }
+		for elem in $var; do
+			uci -q add_list network.${iface}_6.dns="$elem"
+		done
+		uci commit network
+	fi
+    ;;
+	
+"pppoe_dns")
+		[ "$proto_type" != "pppoe" ] && return
+		mode=$3
+		if [ "$mode" == "static" ]; then
+			ip6addr=$4
+			ip6gw=$5
+			[ -z $ip6addr -o -z $ip6gw ] && return
+			dnslist=$6
+		else
+			dnslist=$4
+		fi
+		peerdns="1"
+		[ -n "$dnslist" ] && peerdns="0"
+
+		ifstatus ${iface}_6 2>&- >&-
+		if [ $? -eq 0 ]; then
+			. /lib/netifd/netifd-proto.sh
+			ZONE=$(fw3 -q network wan 2>/dev/null)
+			json_init
+			json_add_string name "wan_6"
+			json_add_string ifname "@wan"
+			if [ "$mode" = "static" ]; then
+				json_add_string proto "static"
+				_proto_push_array "ip6addr" $ip6addr _proto_push_string
+				json_add_string ip6gw "$ip6gw"
+			else
+				json_add_string proto "dhcpv6"
+			fi
+			[ -n "$ZONE" ] && json_add_string zone "$ZONE"
+			json_add_boolean peerdns $peerdns
+			if [ "$peerdns" == "0" ]; then
+				proto_init_dns_server_ex
+				var0=${dnslist//,/ }
+				for dns in $var0; do
+					proto_add_dns_server_ex $dns
+				done
+				proto_update_dns_server_ex
+			fi
+			json_close_object
+			ubus call network add_dynamic "$(json_dump)"
+		fi
+	;;
+
+"wan6_on")
+    #set wan6 interface on
+    if [ "$proto_type" == "pppoe" ]; then
+        logerr "ERROR: Support dhcp or static, but now mode is $proto_type. exit."
+        exit 0
+    fi
+    ip6_enabled=$(uci -q get ipv6.settings.enabled)
+    if [ "$ip6_enabled" = "1" ]; then
+        uci -q batch <<EOF
+        set network.${iface}.ipv6="auto"
+        set network.${iface}_6.auto=1
+        commit network
+EOF
+    fi
+    ;;
+
+"wan6_off")
+    #set wan6 interface off
+    if [ "$proto_type" = "pppoe" ]; then
+        ubus call network.interface.wan_6 remove
+        exit 0
+    fi
+
+    ip6iface=$(uci -q get network.${iface}_6.ifname)
+    if [ -n "$ip6iface" ]; then
+        uci -q batch <<EOF
+		set network.${iface}_6.auto=0
+		commit network
+EOF
+    fi
+    ;;
+
+"wan62_on")
+    #set wan6 interface on
+    if [ "$proto_type" == "pppoe" ]; then
+        logerr "ERROR: Support dhcp or static, but now mode is $proto_type. exit."
+        exit 0
+    fi
+    ip6_enabled=$(uci -q get ipv6.settings2.enabled)
+    if [ "$ip6_enabled" = "1" ]; then
+        uci -q batch <<EOF
+        set network.${iface}.ipv6="auto"
+        set network.${iface}_6.auto=1
+        commit network
+EOF
+    fi
+    ;;
+
+"wan62_off")
+    #set wan6 interface off
+    if [ "$proto_type" = "pppoe" ]; then
+        ubus call network.interface.wan2_6 remove
+        exit 0
+    fi
+
+    ip6iface=$(uci -q get network.${iface}_6.ifname)
+    if [ -n "$ip6iface" ]; then
+        uci -q batch <<EOF
+		set network.${iface}_6.auto=0
+		commit network
+EOF
+    fi
+    ;;
+
+"reload_network")
+	ip6_enabled=$(uci -q get ipv6.settings.enabled)
+    mode=$(uci -q get ipv6.settings.mode)
+	mode_old=$3
+	[ -z "$mode_old" ] && mode_old=$mode
+
+    logger stat_points_none ip6_enabled=$ip6_status,$mode
+
+    ubus call network reload
+    #up-down ipv6 interface: trigger hotplug
+    [ "$ip6_enabled" == "1" -a "$mode" != "off" -a "$mode" != "static" ] && {
+        ifup ${iface}_6 >/dev/null 2>&1
+	}
+
+	[ "$mode_old" != "$mode" ] && {
+		if [ "$ip6_enabled" = "1" -a "$mode" = "nat" ]; then 
+			[ -d "/sys/module/shortcut_fe_cm" ] && /etc/init.d/qca-nss-ecm restart
+		elif [ "$mode_old" = "nat" ]; then
+			[ ! -d "/sys/module/shortcut_fe_cm" -a ! -d "/sys/kernel/debug/ecm/ecm_nss_ipv6" ] && /etc/init.d/qca-nss-ecm restart
+		fi
+	}
+
+    /etc/init.d/dnsmasq restart
+    /etc/init.d/firewall restart
+    ;;
+
+*)
+    usage
+    ;;
+esac
+
+return 0
